@@ -61,6 +61,10 @@ struct Setup {
     ImVec2 DisplaySize{800, 600};
     std::vector<MarkerSpec> Markers;
     std::vector<SquiggleSpec> Squiggles;
+    float FontSize{0}; // Pushed around the editor when nonzero.
+    float FontScaleDpi{1};
+    float StyleAlpha{1};
+    bool NavKeyboard{false};
     // Called on upstream after setup, for settings `Config` does not cover.
     std::function<void(TextEditor &)> Upstream{};
 };

@@ -164,10 +164,13 @@ struct Side {
     ImGuiContext *Ctx;
     std::string Clipboard;
 
-    explicit Side(ImVec2 display) : Ctx(ImGui::CreateContext()) {
+    explicit Side(const Setup &setup) : Ctx(ImGui::CreateContext()) {
         ImGui::SetCurrentContext(Ctx);
         auto &io = ImGui::GetIO();
-        io.DisplaySize = display;
+        io.DisplaySize = setup.DisplaySize;
+        if (setup.NavKeyboard) io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        ImGui::GetStyle().FontScaleDpi = setup.FontScaleDpi;
+        ImGui::GetStyle().Alpha = setup.StyleAlpha;
         io.DeltaTime = 1.f / 60;
         io.IniFilename = nullptr;
         io.LogFilename = nullptr;
@@ -196,14 +199,16 @@ struct Side {
         }
     }
 
-    template<typename F> Capture Run(const Frame &frame, F &&editor) {
+    template<typename F> Capture Run(const Frame &frame, const Setup &setup, F &&editor) {
         ImGui::SetCurrentContext(Ctx);
         Feed(frame);
         ImGui::NewFrame();
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
         ImGui::Begin("Host", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        if (setup.FontSize) ImGui::PushFont(nullptr, setup.FontSize);
         editor();
+        if (setup.FontSize) ImGui::PopFont();
         ImGui::End();
         ImGui::Render();
         for (auto *tex : ImGui::GetPlatformIO().Textures) {
@@ -265,7 +270,7 @@ void Idle(Script &s, int frames) {
 }
 
 int Run(const std::string &name, const Setup &setup, const Script &script, std::string &report) {
-    Side theirs(setup.DisplaySize), ours(setup.DisplaySize);
+    Side theirs(setup), ours(setup);
 
     // Zeroed storage, because upstream's first frame reads an uninitialized palette. See UpstreamBugs.md.
     ImGui::SetCurrentContext(theirs.Ctx);
@@ -360,8 +365,8 @@ int Run(const std::string &name, const Setup &setup, const Script &script, std::
     Capture last;
     for (size_t f = 0; f < script.size(); ++f) {
         HarnessClock::Current += std::chrono::microseconds(int64_t(double(1.0f / 60) * 1e6));
-        const auto a = theirs.Run(script[f], [&] { upstream->Render("Editor"); });
-        const auto b = ours.Run(script[f], [&] { state = ipte::Frame(std::move(state), "Editor"); });
+        const auto a = theirs.Run(script[f], setup, [&] { upstream->Render("Editor"); });
+        const auto b = ours.Run(script[f], setup, [&] { state = ipte::Frame(std::move(state), "Editor"); });
         last = b;
         if (auto why = Differ(a, b); !why.empty()) {
             report = std::format("frame {}: {}", f, why);

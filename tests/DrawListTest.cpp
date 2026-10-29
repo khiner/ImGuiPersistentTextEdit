@@ -451,6 +451,33 @@ int main() {
         Matches("combined", {.Text = Sample + Code + Sample, .Config = {.WordWrap = true, .ShowMiniMap = true, .LineFolding = true, .Language = ipte::Cpp()}, .DisplaySize = {360, 240}}, script);
     };
 
+    "font size, dpi scale, style alpha and keyboard navigation"_test = [] {
+        auto script = Focused();
+        harness::Type(script, "abc");
+        harness::Press(script, ImGuiKey_F, Ctrl);
+        harness::Idle(script, 3);
+        harness::Press(script, ImGuiKey_Escape);
+        harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
+        for (int i = 0; i < 3; ++i) script.push_back({harness::Wheel{0, -1}});
+        harness::Idle(script, 3);
+        harness::Setup setup{.Text = Long() + Code, .Config = {.ShowMiniMap = true, .LineFolding = true, .Language = ipte::Cpp()}};
+        setup.FontSize = 20;
+        setup.FontScaleDpi = 1.5f;
+        setup.StyleAlpha = 0.8f;
+        setup.NavKeyboard = true;
+        Matches("scaled", setup, script);
+    };
+
+    "read-only find window"_test = [] {
+        auto script = Focused();
+        harness::Press(script, ImGuiKey_F, Ctrl);
+        harness::Type(script, "line");
+        harness::Press(script, ImGuiKey_Enter);
+        harness::Press(script, ImGuiKey_G, Ctrl);
+        harness::Idle(script, 3);
+        Matches("read-only-find", {.Text = Sample, .Config = {.ReadOnly = true}}, script);
+    };
+
     "mouse selection"_test = [] {
         auto script = Focused();
         harness::Click(script, 300, 100); // Second click of a double click.
