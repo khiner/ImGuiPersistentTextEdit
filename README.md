@@ -2,6 +2,8 @@
 
 Persistent version of [ImGuiColorTextEdit](https://github.com/goossens/ImGuiColorTextEdit). Essentially ImGuiColorTextEdit + [ewig](https://github.com/arximboldi/ewig) but with my persistent data structures at [persistent](https://github.com/khiner/persistent).
 
+![The editor with the settings and persistent data windows](docs/screenshot.png)
+
 The editor state is a value. The document is a persistent vector of codepoints with a newline count per trie node, so line lookups are logarithmic and edits share unchanged nodes. Cursors, settings, folds, markers and undo history are plain data. Input is converted to actions, `Update` applies an action to a state and returns the new state, and `Frame` draws from the state.
 
 The only test compares draw data with upstream byte for byte after every frame of scripted interactions: typing, movement, selection, clipboard, undo, mouse, scrolling, find and replace, all eleven languages, bracket matching, word wrap in both line breaking modes, folding, minimaps, autocomplete, markers and squiggles, and a matrix of settings. Upstream behavior that is reproduced but wrong is listed in [UpstreamBugs.md](UpstreamBugs.md).
