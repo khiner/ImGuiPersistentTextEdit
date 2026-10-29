@@ -1,0 +1,12 @@
+[submodule "lib/ImGuiColorTextEdit"]
+	path = lib/ImGuiColorTextEdit
+	url = https://github.com/goossens/ImGuiColorTextEdit
+[submodule "lib/persistent"]
+	path = lib/persistent
+	url = https://github.com/khiner/persistent
+[submodule "lib/imgui"]
+	path = lib/imgui
+	url = https://github.com/ocornut/imgui
+[submodule "lib/ut"]
+	path = lib/ut
+	url = https://github.com/boost-ext/ut

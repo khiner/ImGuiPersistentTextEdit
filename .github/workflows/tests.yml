@@ -1,0 +1,45 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  draw-lists:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true # Top level only. persistent's own submodules are its tests' oracles.
+
+      - name: Install dependencies
+        run: brew install llvm ninja
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-draw-lists
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DIPTE_APP=OFF
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build --target DrawListTest
+
+      - name: Test
+        run: ./build/tests/DrawListTest
+
+      - name: Upload mismatch frames
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mismatch-frames
+          path: build/mismatch
+          if-no-files-found: ignore
