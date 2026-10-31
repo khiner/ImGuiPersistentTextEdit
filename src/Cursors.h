@@ -4,13 +4,10 @@
 
 namespace ipte {
 void SetCursor(Cursors &c, DocPos start, DocPos end);
-inline void SetCursor(Cursors &c, DocPos pos) { SetCursor(c, pos, pos); }
 void AddCursor(Cursors &c, DocPos start, DocPos end);
-inline void AddCursor(Cursors &c, DocPos pos) { AddCursor(c, pos, pos); }
 bool AnyHasSelection(const Cursors &c);
-bool AnyHasUpdate(const Cursors &c);
 bool HasMultiple(const Cursors &c);
-void ClearAll(Cursors &c);
+inline void ClearAll(Cursors &c) { SetCursor(c, {}, {}); }
 void ClearAdditional(Cursors &c, bool reset = false);
 // Moves cursors off hidden lines. If any cursor was updated, sorts and merges overlapping cursors.
 void UpdateCursors(State &s);

@@ -2,9 +2,11 @@
 
 #include "Document.h"
 #include "Language.h"
+#include "Layout.h"
 
 #include <algorithm>
 #include <ranges>
+#include <tuple>
 
 namespace ipte {
 namespace {
@@ -31,79 +33,56 @@ enum struct LineState : uint8_t {
     InStringLevel6,
     InStringLevel7,
 };
-constexpr size_t MaxCommentLevel = 7, MaxStringLevel = 7;
+constexpr size_t MaxLevel = 7;
 
 bool InComment(LineState s) { return s >= LineState::InComment && s <= LineState::InCommentLevel7; }
 bool InStringLevel(LineState s) { return s >= LineState::InStringLevel0 && s <= LineState::InStringLevel7; }
-LineState CommentLevel(size_t level) { return LineState(uint8_t(LineState::InComment) + level); }
-LineState StringLevel(size_t level) { return LineState(uint8_t(LineState::InStringLevel0) + level); }
 
-bool Matches(const uint64_t *glyph, const uint64_t *end, const std::string &text) {
-    for (const auto cp : Codepoints(text)) {
-        if (glyph == end || *glyph != cp) return false;
-        ++glyph;
-    }
-    return true;
-}
+bool Matches(const uint64_t *glyph, const uint64_t *end, const std::string &text) { return std::ranges::starts_with(std::ranges::subrange(glyph, end), Codepoints(text)); }
 
 // Colors one line. Returns the state at its end.
 LineState ColorizeLine(const Language &language, const uint64_t *begin, const uint64_t *end, uint8_t *colors, LineState state) {
     auto nonWhiteSpace = false;
     const auto *glyph = begin;
-    const auto set = [&](const uint64_t *from, const uint64_t *to, Color c) {
-        for (; from < to; ++from) colors[from - begin] = uint8_t(c);
+    // Colors the glyphs up to `to` and moves past them.
+    const auto take = [&](const uint64_t *to, Color c) {
+        for (; glyph < to; ++glyph) colors[glyph - begin] = uint8_t(c);
     };
-    const auto one = [&](Color c) { colors[glyph++ - begin] = uint8_t(c); };
+    const auto one = [&](Color c) { take(glyph + 1, c); };
+    const auto starts = [&](const std::string &token) { return !token.empty() && Matches(glyph, end, token); };
+    // Takes a leveled token. In text it enters the token's level. In a level it leaves it if the token's level matches.
+    const auto takeLevel = [&](Language::LevelTokenizer tokenize, LineState level0, Color c) {
+        size_t level;
+        const auto *const tokenEnd = tokenize(glyph, end, level);
+        if (tokenEnd == glyph) return;
+        const auto found = LineState(uint8_t(level0) + std::min(level, MaxLevel));
+        if (state == LineState::InText) state = found;
+        else if (state == found) state = LineState::InText;
+        else return;
+        take(tokenEnd, c);
+    };
 
     while (glyph < end) {
         const auto *const start = glyph;
         if (state == LineState::InText) {
             if (!nonWhiteSpace && language.Preprocess && *glyph != language.Preprocess && !IsWhiteSpace(*glyph)) nonWhiteSpace = true;
 
-            if (language.CommentLevelStart) {
-                size_t level;
-                const auto *const tokenEnd = language.CommentLevelStart(glyph, end, level);
-                if (tokenEnd != glyph) {
-                    level = std::min(level, MaxCommentLevel);
-                    state = CommentLevel(level);
-                    set(glyph, tokenEnd, Color::Comment);
-                    glyph = tokenEnd;
-                }
-            }
-            if (glyph == start && language.StringLevelStart) {
-                size_t level;
-                const auto *const tokenEnd = language.StringLevelStart(glyph, end, level);
-                if (tokenEnd != glyph) {
-                    level = std::min(level, MaxStringLevel);
-                    state = StringLevel(level);
-                    set(glyph, tokenEnd, Color::String);
-                    glyph = tokenEnd;
-                }
-            }
+            if (language.CommentLevelStart) takeLevel(language.CommentLevelStart, LineState::InComment, Color::Comment);
+            if (glyph == start && language.StringLevelStart) takeLevel(language.StringLevelStart, LineState::InStringLevel0, Color::String);
             if (glyph == start) {
                 if (IsWhiteSpace(*glyph)) {
                     one(Color::Whitespace);
-                } else if (!language.CommentStart.empty() && Matches(glyph, end, language.CommentStart)) {
+                } else if (starts(language.CommentStart)) {
                     state = LineState::InComment;
-                    const auto size = language.CommentStart.size();
-                    set(glyph, glyph + size, Color::Comment);
-                    glyph += size;
-                } else if (!language.SingleLineComment.empty() && Matches(glyph, end, language.SingleLineComment)) {
-                    set(glyph, end, Color::Comment);
-                    glyph = end;
-                } else if (!language.SingleLineCommentAlt.empty() && Matches(glyph, end, language.SingleLineCommentAlt)) {
-                    set(glyph, end, Color::Comment);
-                    glyph = end;
-                } else if (!language.OtherStringStart.empty() && Matches(glyph, end, language.OtherStringStart)) {
+                    take(glyph + language.CommentStart.size(), Color::Comment);
+                } else if (starts(language.SingleLineComment) || starts(language.SingleLineCommentAlt)) {
+                    take(end, Color::Comment);
+                } else if (starts(language.OtherStringStart)) {
                     state = LineState::InOtherString;
-                    const auto size = language.OtherStringStart.size();
-                    set(glyph, glyph + size, Color::String);
-                    glyph += size;
-                } else if (!language.OtherStringAltStart.empty() && Matches(glyph, end, language.OtherStringAltStart)) {
+                    take(glyph + language.OtherStringStart.size(), Color::String);
+                } else if (starts(language.OtherStringAltStart)) {
                     state = LineState::InOtherStringAlt;
-                    const auto size = language.OtherStringAltStart.size();
-                    set(glyph, glyph + size, Color::String);
-                    glyph += size;
+                    take(glyph + language.OtherStringAltStart.size(), Color::String);
                 } else if (language.HasSingleQuotedStrings && *glyph == '\'') {
                     state = LineState::InSingleQuotedString;
                     one(Color::String);
@@ -111,16 +90,15 @@ LineState ColorizeLine(const Language &language, const uint64_t *begin, const ui
                     state = LineState::InDoubleQuotedString;
                     one(Color::String);
                 } else if (language.Preprocess && !nonWhiteSpace && *glyph == language.Preprocess) {
-                    set(begin, end, Color::Preprocessor);
-                    glyph = end;
+                    glyph = begin;
+                    take(end, Color::Preprocessor);
                 }
             }
             if (glyph == start) {
                 Color color;
                 const uint64_t *tokenEnd;
                 if (language.CustomTokenizer && (tokenEnd = language.CustomTokenizer(glyph, end, color)) != glyph) {
-                    set(glyph, tokenEnd, color);
-                    glyph = tokenEnd;
+                    take(tokenEnd, color);
                 } else if (language.GetIdentifier && (tokenEnd = language.GetIdentifier(glyph, end)) != glyph) {
                     std::string identifier;
                     color = Color::Identifier;
@@ -128,106 +106,76 @@ LineState ColorizeLine(const Language &language, const uint64_t *begin, const ui
                     if (language.Keywords.contains(identifier)) color = Color::Keyword;
                     else if (language.Declarations.contains(identifier)) color = Color::Declaration;
                     else if (language.Identifiers.contains(identifier)) color = Color::KnownIdentifier;
-                    set(glyph, tokenEnd, color);
-                    glyph = tokenEnd;
+                    take(tokenEnd, color);
                 } else if (language.GetNumber && (tokenEnd = language.GetNumber(glyph, end)) != glyph) {
-                    set(glyph, tokenEnd, Color::Number);
-                    glyph = tokenEnd;
-                } else if (language.IsPunctuation && language.IsPunctuation(*glyph)) {
-                    one(Color::Punctuation);
+                    take(tokenEnd, Color::Number);
                 } else {
-                    one(Color::Text);
+                    one(language.IsPunctuation && language.IsPunctuation(*glyph) ? Color::Punctuation : Color::Text);
                 }
             }
         } else if (InComment(state)) {
-            auto const size = language.CommentEnd.size();
-            if (size && Matches(glyph, end, language.CommentEnd)) {
-                set(glyph, glyph + size, Color::Comment);
-                glyph += size;
+            if (starts(language.CommentEnd)) {
                 state = LineState::InText;
+                take(glyph + language.CommentEnd.size(), Color::Comment);
             } else if (language.CommentLevelEnd) {
-                size_t level;
-                const auto *const tokenEnd = language.CommentLevelEnd(glyph, end, level);
-                if (tokenEnd != glyph) {
-                    level = std::min(level, MaxCommentLevel);
-                    if (state == CommentLevel(level)) {
-                        set(glyph, tokenEnd, Color::Comment);
-                        glyph = tokenEnd;
-                        state = LineState::InText;
-                    }
-                }
+                takeLevel(language.CommentLevelEnd, LineState::InComment, Color::Comment);
             }
             if (InComment(state)) one(Color::Comment);
         } else if (InStringLevel(state)) {
-            size_t level;
-            const auto *const tokenEnd = language.StringLevelEnd(glyph, end, level);
-            if (tokenEnd != glyph) {
-                level = std::min(level, MaxStringLevel);
-                if (state == StringLevel(level)) {
-                    set(glyph, tokenEnd, Color::String);
-                    glyph = tokenEnd;
-                    state = LineState::InText;
-                } else {
-                    one(Color::String);
-                }
-            } else {
-                one(Color::String);
-            }
+            takeLevel(language.StringLevelEnd, LineState::InStringLevel0, Color::String);
+            if (InStringLevel(state)) one(Color::String);
+        } else if (*glyph == language.StringEscape) {
+            one(Color::String);
+            if (glyph < end) one(Color::String);
         } else if (state == LineState::InOtherString || state == LineState::InOtherStringAlt) {
             const auto &closer = state == LineState::InOtherString ? language.OtherStringEnd : language.OtherStringAltEnd;
-            if (*glyph == language.StringEscape) {
-                one(Color::String);
-                if (glyph < end) one(Color::String);
-            } else if (Matches(glyph, end, closer)) {
-                const auto size = closer.size();
-                set(glyph, glyph + size, Color::String);
-                glyph += size;
+            if (Matches(glyph, end, closer)) {
                 state = LineState::InText;
+                take(glyph + closer.size(), Color::String);
             } else {
                 one(Color::String);
             }
         } else {
-            const uint64_t quote = state == LineState::InSingleQuotedString ? '\'' : '"';
-            if (*glyph == language.StringEscape) {
-                one(Color::String);
-                if (glyph < end) one(Color::String);
-            } else if (*glyph == quote) {
-                one(Color::String);
-                state = LineState::InText;
-            } else {
-                one(Color::String);
-            }
+            if (*glyph == (state == LineState::InSingleQuotedString ? '\'' : '"')) state = LineState::InText;
+            one(Color::String);
         }
     }
     return state;
+}
+
+// Leading whitespace in columns.
+uint64_t LineIndent(const State &s, uint64_t line) {
+    uint64_t indent = 0;
+    for (auto i = LineStart(s.Doc, line), end = LineEnd(s.Doc, line); i < end; ++i) {
+        const auto cp = s.Doc[i];
+        if (cp != ' ' && cp != '\t') break;
+        indent += Columns(s.Config.TabSize, cp, indent);
+    }
+    return indent;
 }
 
 // Pairs the brackets colored as punctuation. Colors them by depth, unmatched ones as errors.
 void MatchBrackets(const State &s, View &v) {
     static const Color bracketColors[]{Color::MatchingBracketLevel1, Color::MatchingBracketLevel2, Color::MatchingBracketLevel3};
     std::vector<size_t> levels;
-    uint64_t level = 0;
     const auto lines = LineCount(s.Doc);
     for (uint64_t line = 0; line < lines; ++line) {
         const auto start = LineStart(s.Doc, line), size = LineLength(s.Doc, line);
         for (uint64_t index = 0; index < size; ++index) {
             const auto offset = start + index;
-            const auto cp = s.Doc[offset];
             auto &color = v.Colors[offset];
-            const auto candidate = color == uint8_t(Color::Punctuation);
-            if (candidate && IsBracketOpener(cp)) {
-                levels.push_back(v.Brackets.size());
-                v.Brackets.push_back({cp, {line, index}, 0, {}, level, true});
-                color = uint8_t(bracketColors[level % 3]);
-                ++level;
-            } else if (candidate && IsBracketCloser(cp)) {
+            if (color != uint8_t(Color::Punctuation)) continue;
+            const auto cp = s.Doc[offset];
+            if (IsBracketOpener(cp)) {
+                v.Brackets.push_back({cp, {line, index}, {}, levels.size(), true});
+                color = uint8_t(bracketColors[levels.size() % 3]);
+                levels.push_back(v.Brackets.size() - 1);
+            } else if (IsBracketCloser(cp)) {
                 if (!levels.empty()) {
                     auto &last = v.Brackets[levels.back()];
                     levels.pop_back();
-                    --level;
                     if (last.StartChar == ToPairOpener(cp)) {
-                        color = uint8_t(bracketColors[level % 3]);
-                        last.EndChar = cp;
+                        color = uint8_t(bracketColors[levels.size() % 3]);
                         last.End = {line, index};
                     } else {
                         color = uint8_t(Color::MatchingBracketError);
@@ -255,70 +203,45 @@ void MatchBrackets(const State &s, View &v) {
                 if (LineIndent(s, j) > currentIndent) endLine = j;
                 else break;
             }
-            if (endLine > i) v.Brackets.push_back({0, {i, 0}, 0, {endLine, LineLength(s.Doc, endLine)}, 0, false});
+            if (endLine > i) v.Brackets.push_back({0, {i, 0}, {endLine, LineLength(s.Doc, endLine)}, 0, false});
         }
-        std::ranges::sort(v.Brackets, [](const Bracket &a, const Bracket &b) { return a.Start < b.Start; });
+        std::ranges::sort(v.Brackets, {}, &Bracket::Start);
     }
 }
-} // namespace
 
-uint64_t LineIndent(const State &s, uint64_t line) {
-    uint64_t indent = 0;
-    for (auto i = LineStart(s.Doc, line), end = LineEnd(s.Doc, line); i < end; ++i) {
-        const auto cp = s.Doc[i];
-        if (cp == ' ') ++indent;
-        else if (cp == '\t') indent += s.Config.TabSize - (indent % s.Config.TabSize);
-        else break;
-    }
-    return indent;
-}
+LineState LineStateAt(const State &s, uint64_t line) { return line < s.Derived.LineStates.size() ? LineState(s.Derived.LineStates[line]) : LineState::InText; }
+} // namespace
 
 bool Refresh(State &s) {
     auto &v = s.Derived;
-    if (v.Root == s.Doc.Root && v.Tail == s.Doc.Tail && v.Size == s.Doc.Size && v.Lang == s.Config.Language && v.ShowMatchingBrackets == s.Config.ShowMatchingBrackets && v.TabSize == s.Config.TabSize) return false;
+    auto key = std::tie(v.Root, v.Tail, v.Size, v.Lang, v.ShowMatchingBrackets, v.TabSize);
+    const auto current = std::tie(s.Doc.Root, s.Doc.Tail, s.Doc.Size, s.Config.Language, s.Config.ShowMatchingBrackets, s.Config.TabSize);
+    if (key == current) return false;
+    key = current;
     const auto previous = std::move(v.Brackets);
-    v.Root = s.Doc.Root;
-    v.Tail = s.Doc.Tail;
-    v.Size = s.Doc.Size;
-    v.Lang = s.Config.Language;
-    v.ShowMatchingBrackets = s.Config.ShowMatchingBrackets;
-    v.TabSize = s.Config.TabSize;
     v.Colors.assign(s.Doc.Size, uint8_t(Color::Text));
     v.Brackets.clear();
     ++v.Version;
     const auto lines = LineCount(s.Doc);
     v.LineStates.assign(lines, uint8_t(LineState::InText));
-    if (!s.Config.Language) return previous != v.Brackets;
-
-    std::vector<uint64_t> line;
-    auto state = LineState::InText;
-    for (uint64_t i = 0; i < lines; ++i) {
-        v.LineStates[i] = uint8_t(state);
-        const auto start = LineStart(s.Doc, i), end = LineEnd(s.Doc, i);
-        line.assign(end - start, 0);
-        for (auto k = start; k < end; ++k) line[k - start] = s.Doc[k];
-        state = ColorizeLine(*s.Config.Language, line.data(), line.data() + line.size(), v.Colors.data() + start, state);
+    if (s.Config.Language) {
+        std::vector<uint64_t> line;
+        auto state = LineState::InText;
+        for (uint64_t i = 0; i < lines; ++i) {
+            v.LineStates[i] = uint8_t(state);
+            LineCodepoints(s.Doc, i, line);
+            state = ColorizeLine(*s.Config.Language, line.data(), line.data() + line.size(), v.Colors.data() + LineStart(s.Doc, i), state);
+        }
+        if (s.Config.ShowMatchingBrackets) MatchBrackets(s, v);
     }
-    if (s.Config.ShowMatchingBrackets) MatchBrackets(s, v);
     return previous != v.Brackets;
 }
 
 Color ColorAt(const State &s, uint64_t offset) { return Color(s.Derived.Colors[offset]); }
-bool LineInComment(const State &s, uint64_t line) { return line < s.Derived.LineStates.size() && InComment(LineState(s.Derived.LineStates[line])); }
-bool LineInString(const State &s, uint64_t line) {
-    if (line >= s.Derived.LineStates.size()) return false;
-    const auto state = LineState(s.Derived.LineStates[line]);
-    return state >= LineState::InSingleQuotedString && state <= LineState::InStringLevel7;
-}
+bool LineInComment(const State &s, uint64_t line) { return InComment(LineStateAt(s, line)); }
+bool LineInString(const State &s, uint64_t line) { return LineStateAt(s, line) >= LineState::InSingleQuotedString; }
 
-const Bracket *EnclosingBrackets(const View &v, DocPos pos) {
-    const Bracket *found = nullptr;
-    for (const auto &b : v.Brackets) {
-        if (b.IsAfter(pos)) break;
-        if (b.IsAround(pos)) found = &b;
-    }
-    return found;
-}
+const Bracket *EnclosingBrackets(const View &v, DocPos pos) { return EnclosingBrackets(v, pos, pos); }
 
 const Bracket *EnclosingBrackets(const View &v, DocPos first, DocPos last) {
     const Bracket *found = nullptr;

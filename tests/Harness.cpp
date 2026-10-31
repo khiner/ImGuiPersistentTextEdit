@@ -3,12 +3,13 @@
 #include "HarnessClock.h"
 #include "imgui_internal.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <new>
+#include <ranges>
 
 namespace harness {
 namespace {
@@ -106,31 +107,32 @@ Image Rasterized(const Capture &capture, const ImTextureData *tex, int w, int h)
     return img;
 }
 
-unsigned Crc(const unsigned char *d, size_t n, unsigned crc = 0) {
-    crc = ~crc;
+unsigned Crc(const unsigned char *d, size_t n) {
+    unsigned crc = ~0u;
     for (size_t i = 0; i < n; ++i) {
         crc ^= d[i];
         for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
     }
     return ~crc;
 }
-void Chunk(FILE *f, const char *type, const std::vector<unsigned char> &data) {
-    unsigned char len[4]{(unsigned char)(data.size() >> 24), (unsigned char)(data.size() >> 16), (unsigned char)(data.size() >> 8), (unsigned char)data.size()};
-    std::fwrite(len, 1, 4, f);
-    std::vector<unsigned char> body(type, type + 4);
-    body.insert(body.end(), data.begin(), data.end());
-    std::fwrite(body.data(), 1, body.size(), f);
-    const auto crc = Crc(body.data(), body.size());
-    unsigned char c[4]{(unsigned char)(crc >> 24), (unsigned char)(crc >> 16), (unsigned char)(crc >> 8), (unsigned char)crc};
-    std::fwrite(c, 1, 4, f);
+
+// Appends `v` as four big-endian bytes.
+void Put32(std::vector<unsigned char> &out, unsigned v) { out.insert(out.end(), {(unsigned char)(v >> 24), (unsigned char)(v >> 16), (unsigned char)(v >> 8), (unsigned char)v}); }
+
+void Chunk(std::vector<unsigned char> &png, const char *type, const std::vector<unsigned char> &data) {
+    Put32(png, unsigned(data.size()));
+    const auto start = png.size();
+    png.insert(png.end(), type, type + 4);
+    png.insert(png.end(), data.begin(), data.end());
+    Put32(png, Crc(png.data() + start, png.size() - start));
 }
+
 void WritePng(const std::filesystem::path &path, const Image &img) {
-    FILE *f = std::fopen(path.string().c_str(), "wb");
-    if (!f) return;
-    const unsigned char sig[]{137, 80, 78, 71, 13, 10, 26, 10};
-    std::fwrite(sig, 1, 8, f);
-    std::vector<unsigned char> ihdr{(unsigned char)(img.W >> 24), (unsigned char)(img.W >> 16), (unsigned char)(img.W >> 8), (unsigned char)img.W, (unsigned char)(img.H >> 24), (unsigned char)(img.H >> 16), (unsigned char)(img.H >> 8), (unsigned char)img.H, 8, 2, 0, 0, 0};
-    Chunk(f, "IHDR", ihdr);
+    std::vector<unsigned char> png{137, 80, 78, 71, 13, 10, 26, 10}, ihdr;
+    Put32(ihdr, img.W);
+    Put32(ihdr, img.H);
+    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0});
+    Chunk(png, "IHDR", ihdr);
     std::vector<unsigned char> raw;
     for (int y = 0; y < img.H; ++y) {
         raw.push_back(0);
@@ -153,11 +155,17 @@ void WritePng(const std::filesystem::path &path, const Image &img) {
         a = (a + x) % 65521;
         b = (b + a) % 65521;
     }
-    const unsigned adler = (b << 16) | a;
-    z.insert(z.end(), {(unsigned char)(adler >> 24), (unsigned char)(adler >> 16), (unsigned char)(adler >> 8), (unsigned char)adler});
-    Chunk(f, "IDAT", z);
-    Chunk(f, "IEND", {});
-    std::fclose(f);
+    Put32(z, (b << 16) | a);
+    Chunk(png, "IDAT", z);
+    Chunk(png, "IEND", {});
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char *>(png.data()), std::streamsize(png.size()));
+}
+
+// Writes `capture` as a PNG, rasterized with the font atlas of `ctx`.
+void WriteFrame(const std::filesystem::path &path, ImGuiContext *ctx, const Capture &capture, ImVec2 size) {
+    std::filesystem::create_directories(path.parent_path());
+    ImGui::SetCurrentContext(ctx);
+    WritePng(path, Rasterized(capture, ImGui::GetIO().Fonts->TexData, int(size.x), int(size.y)));
 }
 
 struct Side {
@@ -227,15 +235,22 @@ void Mods(Script &s, int mods, bool down) {
     for (const auto m : {ImGuiMod_Ctrl, ImGuiMod_Shift, ImGuiMod_Alt, ImGuiMod_Super})
         if (mods & m) s.back().push_back(Key{m, down});
 }
-} // namespace
 
-void Press(Script &s, ImGuiKey key, int mods) {
+// Appends a frame pressing `mods` and `down`, then a frame with `up` releasing them.
+void Stroke(Script &s, int mods, Event down, Event up) {
     s.emplace_back();
     Mods(s, mods, true);
-    s.back().push_back(Key{key, true});
-    s.emplace_back();
-    s.back().push_back(Key{key, false});
+    s.back().push_back(down);
+    s.push_back({up});
     Mods(s, mods, false);
+}
+} // namespace
+
+void Press(Script &s, std::initializer_list<ImGuiKeyChord> chords) {
+    for (const auto chord : chords) {
+        const auto key = ImGuiKey(chord & ~ImGuiMod_Mask_);
+        Stroke(s, chord & ImGuiMod_Mask_, Key{key, true}, Key{key, false});
+    }
 }
 
 void Type(Script &s, std::string_view utf8) {
@@ -243,26 +258,21 @@ void Type(Script &s, std::string_view utf8) {
         unsigned cp;
         const auto n = ImTextCharFromUtf8(&cp, utf8.data() + i, utf8.data() + utf8.size());
         i += n ? n : 1;
-        s.emplace_back();
-        if (cp == '\n') {
-            s.back().push_back(Key{ImGuiKey_Enter, true});
-            s.emplace_back();
-            s.back().push_back(Key{ImGuiKey_Enter, false});
-        } else {
-            s.back().push_back(Char{cp});
-        }
+        if (cp == '\n') Press(s, {ImGuiKey_Enter});
+        else s.push_back({Char{cp}});
     }
 }
 
 void Click(Script &s, float x, float y, int button, int mods) {
-    s.emplace_back();
-    s.back().push_back(MousePos{x, y});
-    s.emplace_back();
-    Mods(s, mods, true);
-    s.back().push_back(MouseButton{button, true});
-    s.emplace_back();
-    s.back().push_back(MouseButton{button, false});
-    Mods(s, mods, false);
+    s.push_back({MousePos{x, y}});
+    Stroke(s, mods, MouseButton{button, true}, MouseButton{button, false});
+}
+
+void Drag(Script &s, std::initializer_list<ImVec2> path) {
+    s.push_back({MousePos{path.begin()->x, path.begin()->y}});
+    s.push_back({MouseButton{0, true}});
+    for (const auto &p : path | std::views::drop(1)) s.push_back({MousePos{p.x, p.y}});
+    s.push_back({MouseButton{0, false}});
 }
 
 void Idle(Script &s, int frames) {
@@ -304,13 +314,8 @@ int Run(const std::string &name, const Setup &setup, const Script &script, std::
         upstream->SetLineNumberLeftMargin(c.LeftMargin);
         upstream->SetDecorationLeftMargin(c.DecorationMargin);
         upstream->SetTextLeftMargin(c.TextMargin);
-        TextEditor::Palette palette;
-        for (size_t i = 0; i < palette.size(); ++i) palette[i] = c.Colors[i];
-        upstream->SetPalette(palette);
-        TextEditor::LineBreakConfig lineBreak;
-        lineBreak.useUnicodeAnnex14 = c.LineBreak.UseUnicodeAnnex14;
-        lineBreak.breakAfter = c.LineBreak.BreakAfter;
-        lineBreak.breakBefore = c.LineBreak.BreakBefore;
+        upstream->SetPalette({c.Colors});
+        TextEditor::LineBreakConfig lineBreak{.useUnicodeAnnex14 = c.LineBreak.UseUnicodeAnnex14, .breakAfter = c.LineBreak.BreakAfter, .breakBefore = c.LineBreak.BreakBefore};
         upstream->SetLineBreakConfig(lineBreak);
         if (c.AutoComplete.Enabled) {
             static TextEditor::AutoCompleteConfig autoComplete;
@@ -366,28 +371,17 @@ int Run(const std::string &name, const Setup &setup, const Script &script, std::
     for (size_t f = 0; f < script.size(); ++f) {
         HarnessClock::Current += std::chrono::microseconds(int64_t(double(1.0f / 60) * 1e6));
         const auto a = theirs.Run(script[f], setup, [&] { upstream->Render("Editor"); });
-        const auto b = ours.Run(script[f], setup, [&] { state = ipte::Frame(std::move(state), "Editor"); });
-        last = b;
-        if (auto why = Differ(a, b); !why.empty()) {
+        last = ours.Run(script[f], setup, [&] { state = ipte::Frame(std::move(state), "Editor"); });
+        if (auto why = Differ(a, last); !why.empty()) {
             report = std::format("frame {}: {}", f, why);
             const auto dir = std::filesystem::path(IPTE_BINARY_DIR) / "mismatch" / name;
-            std::filesystem::create_directories(dir);
-            const int w = int(setup.DisplaySize.x), h = int(setup.DisplaySize.y);
-            ImGui::SetCurrentContext(theirs.Ctx);
-            WritePng(dir / std::format("frame{}-upstream.png", f), Rasterized(a, ImGui::GetIO().Fonts->TexData, w, h));
-            ImGui::SetCurrentContext(ours.Ctx);
-            WritePng(dir / std::format("frame{}-ours.png", f), Rasterized(b, ImGui::GetIO().Fonts->TexData, w, h));
+            WriteFrame(dir / std::format("frame{}-upstream.png", f), theirs.Ctx, a, setup.DisplaySize);
+            WriteFrame(dir / std::format("frame{}-ours.png", f), ours.Ctx, last, setup.DisplaySize);
             result = int(f);
             break;
         }
     }
-    if (result == -1 && std::getenv("IPTE_DUMP")) {
-        const auto dir = std::filesystem::path(IPTE_BINARY_DIR) / "dump" / name;
-        std::filesystem::create_directories(dir);
-        const int w = int(setup.DisplaySize.x), h = int(setup.DisplaySize.y);
-        ImGui::SetCurrentContext(ours.Ctx);
-        WritePng(dir / "last.png", Rasterized(last, ImGui::GetIO().Fonts->TexData, w, h));
-    }
+    if (result == -1 && std::getenv("IPTE_DUMP")) WriteFrame(std::filesystem::path(IPTE_BINARY_DIR) / "dump" / name / "last.png", ours.Ctx, last, setup.DisplaySize);
     upstream->~TextEditor();
     return result;
 }

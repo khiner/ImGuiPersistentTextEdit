@@ -139,7 +139,6 @@ constexpr uint64_t InvalidLine = ~uint64_t{0};
 struct Bracket {
     uint64_t StartChar{0};
     DocPos Start;
-    uint64_t EndChar{0};
     DocPos End;
     uint64_t Level{0};
     bool Visible{false};
@@ -191,7 +190,7 @@ struct Typeset {
     std::vector<LineLayout> Lines;
     std::vector<Section> Sections;
     std::vector<Row> Rows;
-    uint64_t TotalRows{0}, TotalColumns{0};
+    uint64_t TotalColumns{0};
     uint64_t Version{0}; // Bumped on every rebuild, for caches over the layout.
 };
 
@@ -242,7 +241,6 @@ struct State {
     Typeset Layout;
     std::vector<MiniRow> MiniRows;
     uint64_t MiniRowsLayout{~uint64_t{0}}, MiniRowsColors{~uint64_t{0}};
-    bool MiniRowsFor{false};
 
     // `Folded` is the lines the user folded. `Folds`, `LineFolds` are derived from the brackets and `Folded`.
     std::vector<uint64_t> Folded;
@@ -273,9 +271,7 @@ struct State {
     float CaretTimer{-0.3f};
     float CursorWidth{0}; // Set after the content size is computed, so the first frame's content size does not include it.
     bool DocUpdated{false};
-    uint32_t TypesetTabSize{0}; // Settings the layout was last built with.
-    bool TypesetWordWrap{false};
-    uint64_t TypesetWordWrapColumns{0}, WordWrapColumns{0};
+    uint64_t WordWrapColumns{0};
 
     // `LineMarkers[line]` and `GlyphSquiggles[offset]` are indices plus one into `Markers` and `Squiggles`, zero for none.
     std::vector<Marker> Markers;

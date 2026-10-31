@@ -12,6 +12,4 @@ bool LineInString(const State &s, uint64_t line);
 const Bracket *EnclosingBrackets(const View &v, DocPos pos);
 const Bracket *EnclosingBrackets(const View &v, DocPos first, DocPos last);
 const Bracket *InnerBrackets(const View &v, DocPos first, DocPos last);
-// Leading whitespace in columns.
-uint64_t LineIndent(const State &s, uint64_t line);
 } // namespace ipte

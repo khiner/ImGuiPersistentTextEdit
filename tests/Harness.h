@@ -8,6 +8,7 @@
 #include "TextEditor.h"
 
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <variant>
 #include <vector>
@@ -37,9 +38,12 @@ using Event = std::variant<Key, Char, MousePos, MouseButton, Wheel, Focus>;
 using Frame = std::vector<Event>;
 using Script = std::vector<Frame>;
 
-void Press(Script &s, ImGuiKey key, int mods = 0);
+// Presses and releases each chord in turn.
+void Press(Script &s, std::initializer_list<ImGuiKeyChord> chords);
 void Type(Script &s, std::string_view utf8);
 void Click(Script &s, float x, float y, int button = 0, int mods = 0);
+// Presses the left button at the first point, moves through the rest and releases it.
+void Drag(Script &s, std::initializer_list<ImVec2> path);
 void Idle(Script &s, int frames);
 
 struct MarkerSpec {

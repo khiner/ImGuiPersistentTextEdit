@@ -14,5 +14,5 @@ target_link_libraries(imgui_sdl3 PUBLIC imgui SDL3::SDL3-static)
 
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS *.cpp)
 add_executable(ImGuiPersistentTextEdit ${APP_SOURCES})
-target_compile_options(ImGuiPersistentTextEdit PRIVATE -Wall -Wextra -Wno-missing-field-initializers -Wno-missing-designated-field-initializers)
+target_compile_options(ImGuiPersistentTextEdit PRIVATE ${IPTE_WARNINGS})
 target_link_libraries(ImGuiPersistentTextEdit PRIVATE TextEdit imgui_sdl3)

@@ -13,6 +13,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+set(IPTE_WARNINGS -Wall -Wextra -Wno-missing-field-initializers -Wno-missing-designated-field-initializers)
 
 # Dear ImGui, the version and definitions of upstream's example.
 add_library(imgui STATIC
@@ -31,7 +32,7 @@ set_target_properties(persistent PROPERTIES CXX_STANDARD 23 INTERPROCEDURAL_OPTI
 file(GLOB TEXTEDIT_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_library(TextEdit STATIC ${TEXTEDIT_SOURCES})
 target_include_directories(TextEdit PUBLIC src)
-target_compile_options(TextEdit PRIVATE -Wall -Wextra -Wno-missing-field-initializers -Wno-missing-designated-field-initializers -fno-rtti)
+target_compile_options(TextEdit PRIVATE ${IPTE_WARNINGS} -fno-rtti)
 target_link_libraries(TextEdit PUBLIC imgui persistent)
 
 add_subdirectory(tests)

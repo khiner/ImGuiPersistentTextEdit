@@ -6,12 +6,13 @@
 #include <boost/ut.hpp>
 
 using namespace boost::ut;
+using namespace harness;
 
 namespace {
-void Matches(const std::string &name, const harness::Setup &setup, const harness::Script &script) {
+// Expects the first frame that differs from upstream to be `frame`, -1 for none.
+void Matches(const std::string &name, const Setup &setup, const Script &script, int frame = -1) {
     std::string report;
-    const auto frame = harness::Run(name, setup, script, report);
-    expect(frame == -1) << name << ": " << report << " (see " IPTE_BINARY_DIR "/mismatch/" << name << ")";
+    expect(Run(name, setup, script, report) == frame) << name << ": " << report << " (see " IPTE_BINARY_DIR "/mismatch/" << name << ")";
 }
 
 // ImGui maps ImGuiMod_Ctrl in shortcuts to Cmd on macOS.
@@ -52,195 +53,156 @@ std::string Long() {
 std::vector<std::string> Suggest(const ipte::AutoCompleteContext &context) {
     static const std::string words[]{"argc", "argv", "include", "int", "printf", "render", "replace", "result", "return"};
     std::vector<std::string> out;
-    for (const auto &w : words) {
-        bool match = context.SearchTerm.size() <= w.size();
-        for (size_t i = 0; match && i < context.SearchTerm.size(); ++i) match = std::tolower(context.SearchTerm[i]) == w[i];
-        if (match) out.push_back(w);
-    }
+    for (const auto &w : words)
+        if (std::ranges::starts_with(w, context.SearchTerm, {}, {}, [](char c) { return std::tolower(c); })) out.push_back(w);
     return out;
 }
 
-harness::Script Focused() {
-    harness::Script s;
-    harness::Idle(s, 2);
-    harness::Click(s, 300, 100);
-    harness::Idle(s, 2);
+Script Focused() {
+    Script s;
+    Idle(s, 2);
+    Click(s, 300, 100);
+    Idle(s, 2);
     return s;
 }
 } // namespace
 
 int main() {
     "empty document"_test = [] {
-        harness::Script script;
-        harness::Idle(script, 3);
+        Script script;
+        Idle(script, 3);
         Matches("empty", {.Text = ""}, script);
     };
 
     "harness sees a difference"_test = [] {
-        harness::Script script;
-        harness::Idle(script, 2);
-        std::string report;
-        const auto frame = harness::Run("negative", {.Text = "\tx", .Upstream = [](TextEditor &e) { e.SetTabSize(2); }}, script, report);
-        expect(frame == 0) << report;
+        Script script;
+        Idle(script, 2);
+        Matches("negative", {.Text = "\tx", .Upstream = [](TextEditor &e) { e.SetTabSize(2); }}, script, 0);
     };
 
     "typing reaches the document"_test = [] {
         auto script = Focused();
-        harness::Type(script, "z");
-        std::string report;
-        const auto frame = harness::Run("negative-typing", {.Text = Sample, .Upstream = [](TextEditor &e) { e.SetReadOnlyEnabled(true); }}, script, report);
-        expect(frame == int(script.size()) - 1) << report;
+        Type(script, "z");
+        Matches("negative-typing", {.Text = Sample, .Upstream = [](TextEditor &e) { e.SetReadOnlyEnabled(true); }}, script, int(script.size()) - 1);
     };
 
     "plain text"_test = [] {
-        harness::Script script;
-        harness::Idle(script, 3);
+        Script script;
+        Idle(script, 3);
         Matches("plain", {.Text = "hello world\n\tsecond line\n"}, script);
     };
 
     "click focuses and places the caret"_test = [] {
         auto script = Focused();
-        harness::Idle(script, 60); // Longer than one caret blink.
+        Idle(script, 60); // Longer than one caret blink.
         Matches("click", {.Text = Sample}, script);
     };
 
     "typing"_test = [] {
         auto script = Focused();
-        harness::Type(script, "abc def\n\tghi (x) {\n}");
-        harness::Idle(script, 3);
+        Type(script, "abc def\n\tghi (x) {\n}");
+        Idle(script, 3);
         Matches("typing", {.Text = Sample}, script);
     };
 
     "movement and selection"_test = [] {
         auto script = Focused();
-        for (int i = 0; i < 3; ++i) harness::Press(script, ImGuiKey_RightArrow);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_End, ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_Home);
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Alt);
-        harness::Press(script, ImGuiKey_LeftArrow, ImGuiMod_Alt | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_A, Ctrl);
-        harness::Idle(script, 3);
+        Press(script, {ImGuiKey_RightArrow, ImGuiKey_RightArrow, ImGuiKey_RightArrow});
+        Press(script, {ImGuiMod_Shift | ImGuiKey_RightArrow, ImGuiMod_Shift | ImGuiKey_DownArrow, ImGuiMod_Shift | ImGuiKey_End});
+        Press(script, {ImGuiKey_Home, ImGuiKey_UpArrow});
+        Press(script, {ImGuiMod_Alt | ImGuiKey_RightArrow, ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_LeftArrow});
+        Press(script, {Ctrl | ImGuiKey_A});
+        Idle(script, 3);
         Matches("movement", {.Text = Sample}, script);
     };
 
     "editing and undo"_test = [] {
         auto script = Focused();
-        harness::Type(script, "xy");
-        harness::Press(script, ImGuiKey_Backspace);
-        harness::Press(script, ImGuiKey_Delete);
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Press(script, ImGuiKey_Z, Ctrl | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_X, Ctrl);
-        harness::Press(script, ImGuiKey_V, Ctrl);
-        harness::Press(script, ImGuiKey_V, Ctrl);
-        harness::Press(script, ImGuiKey_UpArrow, ImGuiMod_Alt);
-        harness::Press(script, ImGuiKey_Tab);
-        harness::Press(script, ImGuiKey_Tab, ImGuiMod_Shift);
-        harness::Idle(script, 3);
+        Type(script, "xy");
+        Press(script, {ImGuiKey_Backspace, ImGuiKey_Delete, ImGuiKey_Enter});
+        Press(script, {Ctrl | ImGuiKey_Z, Ctrl | ImGuiKey_Z, Ctrl | ImGuiMod_Shift | ImGuiKey_Z});
+        Press(script, {ImGuiMod_Shift | ImGuiKey_DownArrow, Ctrl | ImGuiKey_X, Ctrl | ImGuiKey_V, Ctrl | ImGuiKey_V});
+        Press(script, {ImGuiMod_Alt | ImGuiKey_UpArrow, ImGuiKey_Tab, ImGuiMod_Shift | ImGuiKey_Tab});
+        Idle(script, 3);
         Matches("editing", {.Text = Sample}, script);
     };
 
     "scrolling"_test = [] {
         auto script = Focused();
-        for (int i = 0; i < 5; ++i) script.push_back({harness::Wheel{0, -1}});
-        harness::Idle(script, 3);
-        script.push_back({harness::Wheel{-2, 0}});
-        harness::Idle(script, 3);
-        harness::Press(script, ImGuiKey_PageDown);
-        harness::Press(script, ImGuiKey_PageDown);
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Press(script, ImGuiKey_PageUp);
-        harness::Press(script, ImGuiKey_End, Ctrl);
-        harness::Type(script, "end");
-        harness::Press(script, ImGuiKey_Home, Ctrl);
-        for (int i = 0; i < 40; ++i) harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_End);
-        harness::Idle(script, 3);
+        for (int i = 0; i < 5; ++i) script.push_back({Wheel{0, -1}});
+        Idle(script, 3);
+        script.push_back({Wheel{-2, 0}});
+        Idle(script, 3);
+        Press(script, {ImGuiKey_PageDown, ImGuiKey_PageDown, ImGuiKey_UpArrow, ImGuiKey_PageUp, Ctrl | ImGuiKey_End});
+        Type(script, "end");
+        Press(script, {Ctrl | ImGuiKey_Home});
+        for (int i = 0; i < 40; ++i) Press(script, {ImGuiKey_DownArrow});
+        Press(script, {ImGuiKey_End});
+        Idle(script, 3);
         // Drag the vertical scrollbar.
-        script.push_back({harness::MousePos{795, 50}});
-        script.push_back({harness::MouseButton{0, true}});
-        script.push_back({harness::MousePos{795, 200}});
-        script.push_back({harness::MousePos{795, 300}});
-        script.push_back({harness::MouseButton{0, false}});
-        harness::Idle(script, 3);
+        Drag(script, {{795, 50}, {795, 200}, {795, 300}});
+        Idle(script, 3);
         Matches("scrolling", {.Text = Long()}, script);
     };
 
     "cpp colors and brackets"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_End);
-        harness::Type(script, " (a[b]) {");
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Type(script, "}"); // Skips the completed closer.
-        harness::Press(script, ImGuiKey_LeftArrow, ImGuiMod_Alt);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Super | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Super | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_LeftArrow, ImGuiMod_Super | ImGuiMod_Shift);
-        harness::Idle(script, 3);
-        harness::Click(script, 230, 120); // Near the parameter list.
-        harness::Click(script, 230, 120);
-        harness::Idle(script, 3);
+        Press(script, {ImGuiKey_DownArrow, ImGuiKey_DownArrow, ImGuiKey_End});
+        Type(script, " (a[b]) {\n");
+        Type(script, "}"); // Skips the completed closer.
+        Press(script, {ImGuiMod_Alt | ImGuiKey_LeftArrow, ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_RightArrow, ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_RightArrow, ImGuiMod_Super | ImGuiMod_Shift | ImGuiKey_LeftArrow});
+        Idle(script, 3);
+        Click(script, 230, 120); // Near the parameter list.
+        Click(script, 230, 120);
+        Idle(script, 3);
         Matches("cpp", {.Text = Code, .Config = {.Language = ipte::Cpp()}}, script);
     };
 
     "every language"_test = [] {
+        auto script = Focused();
+        Type(script, "x = [1, 2] -- \"s\" --[[ a ]] # t\n");
+        Idle(script, 2);
+        const auto text = Code + "\n```c\nint x;\n```\n# Heading\n{\"k\": [1, true, null]}\nSELECT * FROM t;\n";
         for (const auto *lang : {ipte::C(), ipte::Cs(), ipte::AngelScript(), ipte::Lua(), ipte::Glsl(), ipte::Hlsl(), ipte::Json(), ipte::Markdown(), ipte::Sql()}) {
-            auto script = Focused();
-            harness::Type(script, "x = [1, 2] -- \"s\" --[[ a ]] # t\n");
-            harness::Idle(script, 2);
-            Matches("lang-" + lang->Name, {.Text = Code + "\n```c\nint x;\n```\n# Heading\n{\"k\": [1, true, null]}\nSELECT * FROM t;\n", .Config = {.Language = lang}}, script);
+            Matches("lang-" + lang->Name, {.Text = text, .Config = {.Language = lang}}, script);
         }
     };
 
     "python blocks"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Type(script, "y");
-        harness::Idle(script, 3);
+        Press(script, {ImGuiKey_DownArrow, ImGuiKey_DownArrow, ImGuiKey_DownArrow});
+        Type(script, "y");
+        Idle(script, 3);
         Matches("python", {.Text = PythonCode, .Config = {.Language = ipte::Python()}}, script);
     };
 
     "find and replace"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_F, Ctrl); // Opens on the word under the caret.
-        harness::Idle(script, 2);
-        harness::Type(script, "ur");
-        harness::Idle(script, 2);
-        harness::Press(script, ImGuiKey_Enter); // Back to the editor.
-        harness::Press(script, ImGuiKey_G, Ctrl);
-        harness::Press(script, ImGuiKey_G, Ctrl);
-        harness::Press(script, ImGuiKey_F, Ctrl | ImGuiMod_Shift);
-        harness::Idle(script, 2);
-        harness::Click(script, 708, 27); // Aa
-        harness::Click(script, 740, 27); // []
-        harness::Click(script, 400, 52); // Replace field.
-        harness::Type(script, "X");
-        harness::Click(script, 560, 52); // Replace.
-        harness::Click(script, 640, 52); // Replace All.
-        harness::Idle(script, 2);
-        harness::Press(script, ImGuiKey_Escape);
-        harness::Idle(script, 3);
+        Press(script, {Ctrl | ImGuiKey_F}); // Opens on the word under the caret.
+        Idle(script, 2);
+        Type(script, "ur");
+        Idle(script, 2);
+        Press(script, {ImGuiKey_Enter}); // Back to the editor.
+        Press(script, {Ctrl | ImGuiKey_G, Ctrl | ImGuiKey_G, Ctrl | ImGuiMod_Shift | ImGuiKey_F});
+        Idle(script, 2);
+        Click(script, 708, 27); // Aa
+        Click(script, 740, 27); // []
+        Click(script, 400, 52); // Replace field.
+        Type(script, "X");
+        Click(script, 560, 52); // Replace.
+        Click(script, 640, 52); // Replace All.
+        Idle(script, 2);
+        Press(script, {ImGuiKey_Escape});
+        Idle(script, 3);
         Matches("find", {.Text = Sample + Sample}, script);
     };
 
     "occurrences"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Alt | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_D, Ctrl);
-        harness::Press(script, ImGuiKey_D, Ctrl | ImGuiMod_Shift);
-        harness::Type(script, "y");
-        harness::Press(script, ImGuiKey_Escape);
-        harness::Idle(script, 3);
+        Press(script, {ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_RightArrow, Ctrl | ImGuiKey_D, Ctrl | ImGuiMod_Shift | ImGuiKey_D});
+        Type(script, "y");
+        Press(script, {ImGuiKey_Escape});
+        Idle(script, 3);
         Matches("occurrences", {.Text = Sample + Sample}, script);
     };
 
@@ -256,19 +218,19 @@ int main() {
             {"no-whitespace", {.ShowSpaces = false, .ShowTabs = false}},
             {"no-line-numbers", {.ShowLineNumbers = false}},
             {"no-highlight", {.ShowCurrentLineHighlight = false, .ShowMatchingBrackets = false}},
-            {"no-pairs", {.CompletePairedGlyphs = false, .AutoIndent = false}},
+            {"no-pairs", {.AutoIndent = false, .CompletePairedGlyphs = false}},
             {"read-only", {.ReadOnly = true}},
             {"overwrite", {.Overwrite = true}},
             {"no-carets", {.CaretsVisible = false}},
             {"margins", {.LeftMargin = 3, .DecorationMargin = 2, .TextMargin = 4}},
             {"no-scrollbar-minimap", {.ShowScrollbarMiniMap = false}},
         };
+        auto script = Focused();
+        Press(script, {ImGuiKey_End});
+        Type(script, " (q) {\n}");
+        Press(script, {ImGuiMod_Shift | ImGuiKey_UpArrow});
+        Idle(script, 3);
         for (const auto &v : variants) {
-            auto script = Focused();
-            harness::Press(script, ImGuiKey_End);
-            harness::Type(script, " (q) {\n}");
-            harness::Press(script, ImGuiKey_UpArrow, ImGuiMod_Shift);
-            harness::Idle(script, 3);
             auto config = v.Config;
             config.Language = ipte::Cpp();
             Matches(std::string("settings-") + v.Name, {.Text = Code, .Config = config}, script);
@@ -276,145 +238,119 @@ int main() {
     };
 
     "word wrap"_test = [] {
+        auto script = Focused();
+        Press(script, {Ctrl | ImGuiKey_End});
+        Type(script, "The quick brown fox jumps over the lazy dog, again and again and again, until the line is far too long to fit on one row of this editor window.");
+        Press(script, {ImGuiKey_Home, ImGuiMod_Shift | ImGuiKey_DownArrow, ImGuiMod_Shift | ImGuiKey_RightArrow});
+        Idle(script, 2);
+        Click(script, 300, 300);
+        Click(script, 300, 300);
+        Idle(script, 3);
+        const auto text = Long() + Code + "\tindented wrapped line with a tab at its start and then enough words to wrap it twice over, surely, by now\n";
         for (const auto annex : {false, true}) {
-            auto script = Focused();
-            harness::Press(script, ImGuiKey_End, Ctrl);
-            harness::Type(script, "The quick brown fox jumps over the lazy dog, again and again and again, until the line is far too long to fit on one row of this editor window.");
-            harness::Press(script, ImGuiKey_Home);
-            harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
-            harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Shift);
-            harness::Idle(script, 2);
-            harness::Click(script, 300, 300);
-            harness::Click(script, 300, 300);
-            harness::Idle(script, 3);
-            ipte::Settings config{.WordWrap = true, .Language = ipte::Cpp()};
-            config.LineBreak.UseUnicodeAnnex14 = annex;
-            Matches(annex ? "wrap-annex14" : "wrap", {.Text = Long() + Code + "\tindented wrapped line with a tab at its start and then enough words to wrap it twice over, surely, by now\n", .Config = config, .DisplaySize = {400, 300}}, script);
+            Matches(annex ? "wrap-annex14" : "wrap", {.Text = text, .Config = {.WordWrap = true, .Language = ipte::Cpp(), .LineBreak = {.UseUnicodeAnnex14 = annex}}, .DisplaySize = {400, 300}}, script);
         }
     };
 
     "line folding"_test = [] {
         auto script = Focused();
-        harness::Idle(script, 2);
-        harness::Click(script, 15, 14); // The fold indicator of main's body.
-        harness::Idle(script, 3);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Type(script, "z");
-        harness::Idle(script, 2);
-        harness::Click(script, 15, 14);
-        harness::Idle(script, 2);
-        harness::Click(script, 15, 14);
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Press(script, ImGuiKey_End);
-        harness::Press(script, ImGuiKey_RightArrow);
-        harness::Idle(script, 3);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Idle(script, 3);
-        harness::Click(script, 15, 14);
-        harness::Press(script, ImGuiKey_Home, Ctrl);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Type(script, "void f() {\n}");
-        harness::Idle(script, 3);
+        Idle(script, 2);
+        Click(script, 15, 14); // The fold indicator of main's body.
+        Idle(script, 3);
+        Press(script, {ImGuiKey_DownArrow, ImGuiKey_DownArrow});
+        Type(script, "z");
+        Idle(script, 2);
+        Click(script, 15, 14);
+        Idle(script, 2);
+        Click(script, 15, 14);
+        Press(script, {ImGuiKey_UpArrow, ImGuiKey_End, ImGuiKey_RightArrow});
+        Idle(script, 3);
+        Press(script, {Ctrl | ImGuiKey_Z});
+        Idle(script, 3);
+        Click(script, 15, 14);
+        Press(script, {Ctrl | ImGuiKey_Home, ImGuiKey_DownArrow, ImGuiKey_DownArrow});
+        Type(script, "\nvoid f() {\n}");
+        Idle(script, 3);
         Matches("folding", {.Text = Sample + Sample, .Config = {.LineFolding = true, .Language = ipte::Cpp()}}, script);
     };
 
     "fold once"_test = [] {
         auto script = Focused();
-        harness::Click(script, 15, 14);
-        harness::Idle(script, 3);
+        Click(script, 15, 14);
+        Idle(script, 3);
         Matches("fold-once", {.Text = Sample, .Config = {.LineFolding = true, .Language = ipte::Cpp()}}, script);
     };
 
     "autocomplete"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_End, Ctrl);
-        harness::Type(script, "re");
-        harness::Idle(script, 16);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Idle(script, 2);
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Idle(script, 3);
-        harness::Type(script, " in");
-        harness::Idle(script, 16);
-        harness::Press(script, ImGuiKey_Escape);
-        harness::Idle(script, 3);
-        harness::Type(script, " zz");
-        harness::Press(script, ImGuiKey_Space, Ctrl);
-        harness::Idle(script, 16);
-        harness::Type(script, "q");
-        harness::Idle(script, 3);
-        harness::Type(script, " //ar");
-        harness::Idle(script, 16);
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Type(script, "pr");
-        harness::Idle(script, 16);
-        harness::Press(script, ImGuiKey_Tab);
-        harness::Idle(script, 3);
-        ipte::Settings config{.Language = ipte::Cpp()};
-        config.AutoComplete.Enabled = true;
-        config.AutoComplete.Provider = Suggest;
-        Matches("autocomplete", {.Text = Sample, .Config = config}, script);
+        Press(script, {Ctrl | ImGuiKey_End});
+        Type(script, "re");
+        Idle(script, 16);
+        Press(script, {ImGuiKey_DownArrow, ImGuiKey_DownArrow, ImGuiKey_UpArrow});
+        Idle(script, 2);
+        Press(script, {ImGuiKey_Enter});
+        Idle(script, 3);
+        Type(script, " in");
+        Idle(script, 16);
+        Press(script, {ImGuiKey_Escape});
+        Idle(script, 3);
+        Type(script, " zz");
+        Press(script, {Ctrl | ImGuiKey_Space});
+        Idle(script, 16);
+        Type(script, "q");
+        Idle(script, 3);
+        Type(script, " //ar");
+        Idle(script, 16);
+        Press(script, {ImGuiKey_Enter});
+        Type(script, "pr");
+        Idle(script, 16);
+        Press(script, {ImGuiKey_Tab});
+        Idle(script, 3);
+        Matches("autocomplete", {.Text = Sample, .Config = {.Language = ipte::Cpp(), .AutoComplete = {.Enabled = true, .Provider = Suggest}}}, script);
     };
 
     "minimap"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
-        harness::Idle(script, 2);
-        harness::Click(script, 790, 400); // Far down the minimap.
-        harness::Idle(script, 3);
-        harness::Click(script, 790, 300);
-        script.push_back({harness::MousePos{790, 60}});
-        script.push_back({harness::MouseButton{0, true}});
-        script.push_back({harness::MousePos{790, 80}});
-        script.push_back({harness::MousePos{790, 120}});
-        script.push_back({harness::MouseButton{0, false}});
-        harness::Idle(script, 3);
+        Press(script, {ImGuiMod_Shift | ImGuiKey_DownArrow});
+        Idle(script, 2);
+        Click(script, 790, 400); // Far down the minimap.
+        Idle(script, 3);
+        Click(script, 790, 300);
+        Drag(script, {{790, 60}, {790, 80}, {790, 120}});
+        Idle(script, 3);
         Matches("minimap", {.Text = Long() + Code, .Config = {.ShowMiniMap = true, .Language = ipte::Cpp()}}, script);
     };
 
     "middle mouse pan and scroll"_test = [] {
         for (const auto pan : {true, false}) {
             auto script = Focused();
-            script.push_back({harness::MousePos{300, 300}});
-            script.push_back({harness::MouseButton{2, true}});
-            harness::Idle(script, 2);
-            script.push_back({harness::MousePos{300, 200}});
-            script.push_back({harness::MousePos{320, 150}});
-            harness::Idle(script, 4);
-            script.push_back({harness::MouseButton{2, false}});
-            harness::Idle(script, 2);
-            if (!pan) harness::Click(script, 300, 300);
-            harness::Idle(script, 3);
+            script.push_back({MousePos{300, 300}});
+            script.push_back({MouseButton{2, true}});
+            Idle(script, 2);
+            script.push_back({MousePos{300, 200}});
+            script.push_back({MousePos{320, 150}});
+            Idle(script, 4);
+            script.push_back({MouseButton{2, false}});
+            Idle(script, 2);
+            if (!pan) Click(script, 300, 300);
+            Idle(script, 3);
             Matches(pan ? "pan" : "scroll-mode", {.Text = Long(), .Config = {.PanMode = pan}}, script);
         }
     };
 
     "markers and squiggles"_test = [] {
         auto script = Focused();
-        script.push_back({harness::MousePos{100, 28}}); // Over the marked line's text.
-        harness::Idle(script, 3);
-        script.push_back({harness::MousePos{20, 28}}); // Over its number.
-        harness::Idle(script, 3);
-        script.push_back({harness::MousePos{60, 67}}); // Over a squiggle.
-        harness::Idle(script, 3);
-        harness::Click(script, 300, 67);
-        harness::Press(script, ImGuiKey_Home);
-        harness::Press(script, ImGuiKey_Delete);
-        harness::Press(script, ImGuiKey_Delete);
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Press(script, ImGuiKey_End);
-        harness::Press(script, ImGuiKey_Backspace);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Press(script, ImGuiKey_Z, Ctrl);
-        harness::Press(script, ImGuiKey_Z, Ctrl | ImGuiMod_Shift);
-        harness::Idle(script, 3);
-        harness::Setup setup{.Text = Sample, .Config = {.ShowMiniMap = true, .Language = ipte::Cpp()}};
+        script.push_back({MousePos{100, 28}}); // Over the marked line's text.
+        Idle(script, 3);
+        script.push_back({MousePos{20, 28}}); // Over its number.
+        Idle(script, 3);
+        script.push_back({MousePos{60, 67}}); // Over a squiggle.
+        Idle(script, 3);
+        Click(script, 300, 67);
+        Press(script, {ImGuiKey_Home, ImGuiKey_Delete, ImGuiKey_Delete, ImGuiKey_UpArrow, ImGuiKey_End, ImGuiKey_Backspace});
+        Press(script, {Ctrl | ImGuiKey_Z, Ctrl | ImGuiKey_Z, Ctrl | ImGuiKey_Z, Ctrl | ImGuiMod_Shift | ImGuiKey_Z});
+        Idle(script, 3);
+        Setup setup{.Text = Sample, .Config = {.ShowMiniMap = true, .Language = ipte::Cpp()}};
         setup.Markers = {{1, IM_COL32(200, 0, 0, 255), IM_COL32(100, 0, 0, 80), "number tip", "text tip"}, {4, IM_COL32(0, 0, 200, 255), 0, "", ""}};
         setup.Squiggles = {{{4, 0}, {4, 5}, 1, IM_COL32(255, 0, 0, 255), "wavy"}, {{4, 6}, {5, 3}, 2, IM_COL32(0, 255, 0, 100), "", ipte::SquiggleStyle::Background}};
         Matches("markers", setup, script);
@@ -422,76 +358,56 @@ int main() {
 
     "unicode"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_End, Ctrl);
-        harness::Type(script, "日本語 テキスト ünïcödé\tx");
-        harness::Press(script, ImGuiKey_Home);
-        harness::Press(script, ImGuiKey_RightArrow);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_RightArrow, ImGuiMod_Alt | ImGuiMod_Shift);
-        harness::Press(script, ImGuiKey_C, Ctrl);
-        harness::Press(script, ImGuiKey_End);
-        harness::Press(script, ImGuiKey_V, Ctrl);
-        harness::Press(script, ImGuiKey_Backspace, ImGuiMod_Alt);
-        harness::Idle(script, 3);
+        Press(script, {Ctrl | ImGuiKey_End});
+        Type(script, "日本語 テキスト ünïcödé\tx");
+        Press(script, {ImGuiKey_Home, ImGuiKey_RightArrow, ImGuiMod_Shift | ImGuiKey_RightArrow, ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_RightArrow});
+        Press(script, {Ctrl | ImGuiKey_C, ImGuiKey_End, Ctrl | ImGuiKey_V, ImGuiMod_Alt | ImGuiKey_Backspace});
+        Idle(script, 3);
         Matches("unicode", {.Text = "int 変数 = 1; // コメント\n\t\"文字列\" 'c'\nΩ ≈ α + β\n", .Config = {.WordWrap = true, .Language = ipte::Cpp()}, .DisplaySize = {300, 200}}, script);
     };
 
     "wrap, folding and minimap together"_test = [] {
         auto script = Focused();
-        harness::Click(script, 15, 14);
-        harness::Idle(script, 2);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_DownArrow);
-        harness::Press(script, ImGuiKey_End);
-        harness::Type(script, " and a long tail of words that will certainly wrap around the narrow window more than once");
-        harness::Press(script, ImGuiKey_UpArrow);
-        harness::Press(script, ImGuiKey_UpArrow, ImGuiMod_Shift);
-        for (int i = 0; i < 3; ++i) script.push_back({harness::Wheel{0, -1}});
-        harness::Idle(script, 3);
+        Click(script, 15, 14);
+        Idle(script, 2);
+        Press(script, {ImGuiKey_DownArrow, ImGuiKey_DownArrow, ImGuiKey_End});
+        Type(script, " and a long tail of words that will certainly wrap around the narrow window more than once");
+        Press(script, {ImGuiKey_UpArrow, ImGuiMod_Shift | ImGuiKey_UpArrow});
+        for (int i = 0; i < 3; ++i) script.push_back({Wheel{0, -1}});
+        Idle(script, 3);
         Matches("combined", {.Text = Sample + Code + Sample, .Config = {.WordWrap = true, .ShowMiniMap = true, .LineFolding = true, .Language = ipte::Cpp()}, .DisplaySize = {360, 240}}, script);
     };
 
     "font size, dpi scale, style alpha and keyboard navigation"_test = [] {
         auto script = Focused();
-        harness::Type(script, "abc");
-        harness::Press(script, ImGuiKey_F, Ctrl);
-        harness::Idle(script, 3);
-        harness::Press(script, ImGuiKey_Escape);
-        harness::Press(script, ImGuiKey_DownArrow, ImGuiMod_Shift);
-        for (int i = 0; i < 3; ++i) script.push_back({harness::Wheel{0, -1}});
-        harness::Idle(script, 3);
-        harness::Setup setup{.Text = Long() + Code, .Config = {.ShowMiniMap = true, .LineFolding = true, .Language = ipte::Cpp()}};
-        setup.FontSize = 20;
-        setup.FontScaleDpi = 1.5f;
-        setup.StyleAlpha = 0.8f;
-        setup.NavKeyboard = true;
-        Matches("scaled", setup, script);
+        Type(script, "abc");
+        Press(script, {Ctrl | ImGuiKey_F});
+        Idle(script, 3);
+        Press(script, {ImGuiKey_Escape, ImGuiMod_Shift | ImGuiKey_DownArrow});
+        for (int i = 0; i < 3; ++i) script.push_back({Wheel{0, -1}});
+        Idle(script, 3);
+        Matches("scaled", {.Text = Long() + Code, .Config = {.ShowMiniMap = true, .LineFolding = true, .Language = ipte::Cpp()}, .FontSize = 20, .FontScaleDpi = 1.5f, .StyleAlpha = 0.8f, .NavKeyboard = true}, script);
     };
 
     "read-only find window"_test = [] {
         auto script = Focused();
-        harness::Press(script, ImGuiKey_F, Ctrl);
-        harness::Type(script, "line");
-        harness::Press(script, ImGuiKey_Enter);
-        harness::Press(script, ImGuiKey_G, Ctrl);
-        harness::Idle(script, 3);
+        Press(script, {Ctrl | ImGuiKey_F});
+        Type(script, "line");
+        Press(script, {ImGuiKey_Enter, Ctrl | ImGuiKey_G});
+        Idle(script, 3);
         Matches("read-only-find", {.Text = Sample, .Config = {.ReadOnly = true}}, script);
     };
 
     "mouse selection"_test = [] {
         auto script = Focused();
-        harness::Click(script, 300, 100); // Second click of a double click.
-        harness::Idle(script, 2);
-        script.push_back({harness::MousePos{320, 100}});
-        script.push_back({harness::MouseButton{0, true}});
-        script.push_back({harness::MousePos{400, 130}});
-        script.push_back({harness::MousePos{420, 150}});
-        script.push_back({harness::MouseButton{0, false}});
-        harness::Idle(script, 2);
-        harness::Click(script, 10, 60); // Line numbers.
-        harness::Click(script, 300, 20, 0, ImGuiMod_Alt); // Adds a cursor.
-        harness::Type(script, "Q");
-        harness::Idle(script, 3);
+        Click(script, 300, 100); // Second click of a double click.
+        Idle(script, 2);
+        Drag(script, {{320, 100}, {400, 130}, {420, 150}});
+        Idle(script, 2);
+        Click(script, 10, 60); // Line numbers.
+        Click(script, 300, 20, 0, ImGuiMod_Alt); // Adds a cursor.
+        Type(script, "Q");
+        Idle(script, 3);
         Matches("mouse", {.Text = Sample}, script);
     };
 }

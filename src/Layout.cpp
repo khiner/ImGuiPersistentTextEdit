@@ -1,19 +1,21 @@
 #include "Layout.h"
 
+#include "Colorize.h"
 #include "Document.h"
 #include "LineBreak.h"
 
 #include <algorithm>
-#include <unordered_set>
+#include <span>
+#include <tuple>
 
 namespace ipte {
-uint32_t Columns(const Settings &config, uint64_t cp, uint64_t column) {
-    if (cp == '\t') return uint32_t(config.TabSize - (column % config.TabSize));
+uint32_t Columns(uint32_t tabSize, uint64_t cp, uint64_t column) {
+    if (cp == '\t') return uint32_t(tabSize - (column % tabSize));
     return uint32_t(GlyphWidth(cp));
 }
 
 bool RefreshFolds(State &s, bool bracketsChanged) {
-    bool updated = s.FoldsDirty;
+    bool updated = s.FoldsDirty || bracketsChanged;
     s.FoldsDirty = false;
     if (s.LineFoldsFor != s.Config.LineFolding) {
         s.LineFoldsFor = s.Config.LineFolding;
@@ -23,26 +25,21 @@ bool RefreshFolds(State &s, bool bracketsChanged) {
         }
         updated = true;
     }
-    if (bracketsChanged) updated = true;
 
-    const auto lines = LineCount(s.Doc);
     if (s.Config.LineFolding && updated) {
         s.Folds.clear();
-        std::unordered_set<uint64_t> previouslyFolded;
-        for (const auto &b : s.Derived.Brackets) {
-            if (b.End.Line - b.Start.Line >= 1) {
-                if (std::ranges::find(s.Folded, b.Start.Line) != s.Folded.end()) previouslyFolded.insert(b.Start.Line);
-                s.Folds.push_back({b.Start.Line, b.End.Line});
-            }
-        }
-        s.Folded.assign(previouslyFolded.begin(), previouslyFolded.end());
+        for (const auto &b : s.Derived.Brackets)
+            if (b.End.Line != b.Start.Line) s.Folds.push_back({b.Start.Line, b.End.Line});
+        std::erase_if(s.Folded, [&](uint64_t line) { return !std::ranges::contains(s.Folds, line, &Fold::Start); });
         std::ranges::sort(s.Folded);
+        s.Folded.erase(std::ranges::unique(s.Folded).begin(), s.Folded.end());
         ++s.FoldsVersion;
     }
+    const auto lines = LineCount(s.Doc);
     if (s.LineFolds.size() != lines || updated) {
         s.LineFolds.assign(lines, FoldingState::Visible);
         for (const auto &fold : s.Folds) {
-            if (std::ranges::find(s.Folded, fold.Start) != s.Folded.end()) {
+            if (std::ranges::contains(s.Folded, fold.Start)) {
                 s.LineFolds[fold.Start] = FoldingState::Folded;
                 for (auto i = fold.Start + 1; i <= fold.End; ++i) s.LineFolds[i] = FoldingState::Hidden;
             } else if (s.LineFolds[fold.Start] != FoldingState::Hidden) {
@@ -54,7 +51,7 @@ bool RefreshFolds(State &s, bool bracketsChanged) {
 }
 
 namespace {
-void Classify(const State &s, const std::vector<uint64_t> &line, std::vector<BreakOption> &breaks) {
+void Classify(const LineBreakConfig &config, const std::vector<uint64_t> &line, std::vector<BreakOption> &breaks) {
     const auto size = line.size();
     breaks.assign(size, BreakOption::Undefined);
     if (size == 0) return;
@@ -62,16 +59,14 @@ void Classify(const State &s, const std::vector<uint64_t> &line, std::vector<Bre
         breaks[0] = BreakOption::NoBreak;
         return;
     }
-    const auto &config = s.Config.LineBreak;
     if (config.UseUnicodeAnnex14) {
         ClassifyAnnex14(config, line.data(), size, breaks.data());
     } else {
         const auto after = Codepoints(config.BreakAfter), before = Codepoints(config.BreakBefore);
-        const auto in = [](const std::vector<uint64_t> &set, uint64_t cp) { return std::ranges::find(set, cp) != set.end(); };
         for (size_t i = 0; i < size; ++i) {
-            if (in(after, line[i])) {
+            if (std::ranges::contains(after, line[i])) {
                 breaks[i] = BreakOption::AllowBreak;
-            } else if (i && in(before, line[i])) {
+            } else if (i && std::ranges::contains(before, line[i])) {
                 breaks[i - 1] = BreakOption::AllowBreak;
                 breaks[i] = BreakOption::NoBreak;
             } else {
@@ -85,25 +80,18 @@ void Classify(const State &s, const std::vector<uint64_t> &line, std::vector<Bre
 void TypesetLine(State &s, uint64_t index, std::vector<uint64_t> &line, std::vector<uint32_t> &widths, std::vector<BreakOption> &breaks) {
     auto &layout = s.Layout.Lines[index];
     auto &sections = s.Layout.Sections;
-    const auto start = LineStart(s.Doc, index), end = LineEnd(s.Doc, index);
-    line.assign(end - start, 0);
-    widths.assign(end - start, 0);
+    LineCodepoints(s.Doc, index, line);
+    widths.clear();
     uint64_t columns = 0;
-    for (auto k = start; k < end; ++k) {
-        line[k - start] = s.Doc[k];
-        widths[k - start] = Columns(s.Config, s.Doc[k], columns);
-        columns += widths[k - start];
+    for (const auto cp : line) {
+        widths.push_back(Columns(s.Config.TabSize, cp, columns));
+        columns += widths.back();
     }
-    layout.Rows = 1;
-    layout.FirstSection = InvalidLine;
-    if (!s.Config.WordWrap) {
-        layout.Columns = columns;
-        return;
-    }
+    layout.Columns = columns;
+    if (!s.Config.WordWrap) return;
 
-    Classify(s, line, breaks);
-    const auto wordWrapColumns = s.WordWrapColumns;
-    std::vector<Section> found;
+    Classify(s.Config.LineBreak, line, breaks);
+    const auto first = sections.size();
     uint64_t lastBreakIndex = 0, lastBreakableIndex = 0, lastBreakableColumn = 0, indent = 0;
     columns = 0;
     bool isAtBeginning = true, isFirstRow = true;
@@ -111,8 +99,7 @@ void TypesetLine(State &s, uint64_t index, std::vector<uint64_t> &line, std::vec
     size_t i = 0;
     while (i < size) {
         if (breaks[i] == BreakOption::MustBreak) {
-            ++layout.Rows;
-            found.push_back({lastBreakIndex, i, columns, indent});
+            sections.push_back({lastBreakIndex, i, columns, indent});
             columns = 0;
             indent = 0;
             isAtBeginning = true;
@@ -125,7 +112,7 @@ void TypesetLine(State &s, uint64_t index, std::vector<uint64_t> &line, std::vec
                 else isAtBeginning = false;
             }
             columns += widths[i];
-            if (columns < wordWrapColumns) {
+            if (columns < s.WordWrapColumns) {
                 if (breaks[i] == BreakOption::AllowBreak) {
                     lastBreakableIndex = i + 1;
                     lastBreakableColumn = columns;
@@ -134,12 +121,10 @@ void TypesetLine(State &s, uint64_t index, std::vector<uint64_t> &line, std::vec
             } else {
                 if (lastBreakableIndex == lastBreakIndex) {
                     lastBreakableIndex = i + 1;
-                    found.push_back({lastBreakIndex, lastBreakableIndex, columns, isFirstRow ? 0 : indent});
-                } else {
-                    found.push_back({lastBreakIndex, lastBreakableIndex, lastBreakableColumn, isFirstRow ? 0 : indent});
+                    lastBreakableColumn = columns;
                 }
+                sections.push_back({lastBreakIndex, lastBreakableIndex, lastBreakableColumn, isFirstRow ? 0 : indent});
                 i = lastBreakableIndex;
-                ++layout.Rows;
                 columns = indent;
                 lastBreakIndex = lastBreakableIndex;
                 lastBreakableColumn = indent;
@@ -147,49 +132,39 @@ void TypesetLine(State &s, uint64_t index, std::vector<uint64_t> &line, std::vec
             }
         }
     }
-    if (layout.Rows > 1) {
-        found.push_back({lastBreakIndex, size, columns, indent});
-        layout.FirstSection = sections.size();
-        layout.Columns = 0;
-        for (const auto &section : found) {
-            sections.push_back(section);
-            layout.Columns = std::max(layout.Columns, section.Columns);
-        }
-    } else {
-        layout.Columns = columns;
-    }
-}
+    if (sections.size() == first) return;
 
-// Sums glyph widths in [from, to). `lineColumn` is the running column from the line start, for tabs.
-uint64_t ColumnsBefore(const State &s, uint64_t lineStart, uint64_t from, uint64_t to, uint64_t &lineColumn) {
-    uint64_t columns = 0;
-    for (auto i = from; i < to; ++i) {
-        const auto w = Columns(s.Config, s.Doc[lineStart + i], lineColumn);
-        lineColumn += w;
-        columns += w;
-    }
-    return columns;
+    sections.push_back({lastBreakIndex, size, columns, indent});
+    layout.FirstSection = first;
+    layout.Rows = sections.size() - first;
+    layout.Columns = std::ranges::max(std::span(sections).subspan(first), {}, &Section::Columns).Columns;
 }
 } // namespace
 
+RowWalk::RowWalk(const State &s, uint64_t line, uint64_t section) : S(s), Start(LineStart(s.Doc, line)) {
+    const auto first = s.Layout.Lines[line].FirstSection;
+    if (first == InvalidLine) {
+        End = LineLength(s.Doc, line);
+        return;
+    }
+    const auto &sec = s.Layout.Sections[first + section];
+    End = sec.EndIndex;
+    while (Index < sec.StartIndex) Step();
+    Column = sec.Indent;
+}
+
 void RefreshLayout(State &s) {
     auto &t = s.Layout;
-    if (t.Root == s.Doc.Root && t.Tail == s.Doc.Tail && t.Size == s.Doc.Size && t.TabSize == s.Config.TabSize && t.WordWrap == s.Config.WordWrap && t.WordWrapColumns == s.WordWrapColumns && t.LineBreak == s.Config.LineBreak && t.FoldsVersion == s.FoldsVersion) return;
-    t.Root = s.Doc.Root;
-    t.Tail = s.Doc.Tail;
-    t.Size = s.Doc.Size;
-    t.TabSize = s.Config.TabSize;
-    t.WordWrap = s.Config.WordWrap;
-    t.WordWrapColumns = s.WordWrapColumns;
-    t.LineBreak = s.Config.LineBreak;
-    t.FoldsVersion = s.FoldsVersion;
+    auto key = std::tie(t.Root, t.Tail, t.Size, t.TabSize, t.WordWrap, t.WordWrapColumns, t.LineBreak, t.FoldsVersion);
+    const auto current = std::tie(s.Doc.Root, s.Doc.Tail, s.Doc.Size, s.Config.TabSize, s.Config.WordWrap, s.WordWrapColumns, s.Config.LineBreak, s.FoldsVersion);
+    if (key == current) return;
+    key = current;
     ++t.Version;
 
     const auto lines = LineCount(s.Doc);
     t.Lines.assign(lines, {});
     t.Sections.clear();
     t.Rows.clear();
-    t.TotalRows = 0;
     t.TotalColumns = 0;
     std::vector<uint64_t> line;
     std::vector<uint32_t> widths;
@@ -197,15 +172,10 @@ void RefreshLayout(State &s) {
     for (uint64_t i = 0; i < lines; ++i) {
         TypesetLine(s, i, line, widths, breaks);
         auto &layout = t.Lines[i];
-        layout.Row = t.TotalRows;
+        layout.Row = t.Rows.size();
         if (IsHidden(s, i)) continue;
-        t.TotalRows += layout.Rows;
         t.TotalColumns = std::max(t.TotalColumns, layout.Columns);
-        if (layout.FirstSection != InvalidLine) {
-            for (uint64_t k = 0; k < layout.Rows; ++k) t.Rows.push_back({i, k, t.Sections[layout.FirstSection + k].Columns});
-        } else {
-            t.Rows.push_back({i, 0, layout.Columns});
-        }
+        for (uint64_t k = 0; k < layout.Rows; ++k) t.Rows.push_back({i, k, layout.FirstSection == InvalidLine ? layout.Columns : t.Sections[layout.FirstSection + k].Columns});
     }
 }
 
@@ -213,148 +183,75 @@ VisPos DocToVis(const State &s, DocPos pos) {
     const auto &t = s.Layout;
     if (t.Rows.empty() || pos.Line >= t.Lines.size()) return {};
     const auto &line = t.Lines[pos.Line];
-    VisPos vis{line.Row, 0};
-    const auto lineStart = LineStart(s.Doc, pos.Line);
-    if (IsHidden(s, pos.Line)) {
-        vis.Column = line.Row < t.Rows.size() ? t.Rows[line.Row].Columns : 0;
-    } else if (line.FirstSection != InvalidLine) {
-        for (uint64_t k = 0; k < line.Rows; ++k) {
+    if (IsHidden(s, pos.Line)) return {line.Row, line.Row < t.Rows.size() ? t.Rows[line.Row].Columns : 0};
+    uint64_t k = 0;
+    if (line.FirstSection != InvalidLine) {
+        for (; k < line.Rows; ++k) {
             const auto &section = t.Sections[line.FirstSection + k];
-            if (pos.Index >= section.StartIndex && pos.Index <= section.EndIndex) {
-                uint64_t lineColumn = 0;
-                ColumnsBefore(s, lineStart, 0, section.StartIndex, lineColumn);
-                vis.Column = section.Indent + ColumnsBefore(s, lineStart, section.StartIndex, pos.Index, lineColumn);
-                break;
-            }
-            ++vis.Row;
+            if (pos.Index >= section.StartIndex && pos.Index <= section.EndIndex) break;
         }
-    } else {
-        uint64_t lineColumn = 0;
-        vis.Column = ColumnsBefore(s, lineStart, 0, pos.Index, lineColumn);
+        if (k == line.Rows) return {line.Row + k, 0};
     }
-    return vis;
+    RowWalk walk(s, pos.Line, k);
+    while (walk.Index < pos.Index) walk.Step();
+    return {line.Row + k, walk.Column};
 }
 
 DocPos VisToDoc(const State &s, VisPos pos) {
-    const auto &t = s.Layout;
-    if (pos.Row >= t.Rows.size()) return {};
-    const auto &row = t.Rows[pos.Row];
+    if (pos.Row >= s.Layout.Rows.size()) return {};
+    const auto &row = s.Layout.Rows[pos.Row];
     if (row.Line >= LineCount(s.Doc)) return {};
-    const auto &line = t.Lines[row.Line];
-    const auto lineStart = LineStart(s.Doc, row.Line);
-    uint64_t index, left, right, end, lineColumn = 0;
-    if (line.FirstSection != InvalidLine) {
-        const auto &section = t.Sections[line.FirstSection + row.Section];
-        index = section.StartIndex;
-        left = right = section.Indent;
-        end = section.EndIndex;
-        ColumnsBefore(s, lineStart, 0, section.StartIndex, lineColumn);
-    } else {
-        index = left = right = 0;
-        end = LineLength(s.Doc, row.Line);
-    }
-    while (right < pos.Column && index < end) {
-        left = right;
-        const auto w = Columns(s.Config, s.Doc[lineStart + index], lineColumn);
-        lineColumn += w;
-        right += w;
-        ++index;
-    }
-    if (right - left <= 1) return {row.Line, index};
-    return {row.Line, pos.Column - left <= right - pos.Column ? index - 1 : index};
+    RowWalk walk(s, row.Line, row.Section);
+    const auto left = walk.StepTo(pos.Column), right = walk.Column;
+    if (right - left <= 1) return {row.Line, walk.Index};
+    return {row.Line, pos.Column - left <= right - pos.Column ? walk.Index - 1 : walk.Index};
 }
 
 VisPos NormalizeVis(const State &s, VisPos pos) {
-    const auto &t = s.Layout;
-    if (t.TotalRows == 0) return {};
-    if (pos.Row >= t.TotalRows) return {t.TotalRows - 1, t.Rows[t.TotalRows - 1].Columns};
-    if (pos.Column > t.Rows[pos.Row].Columns) return {pos.Row, t.Rows[pos.Row].Columns};
+    const auto &rows = s.Layout.Rows;
+    if (rows.empty()) return {};
+    if (pos.Row >= rows.size()) return {rows.size() - 1, rows.back().Columns};
+    if (pos.Column > rows[pos.Row].Columns) return {pos.Row, rows[pos.Row].Columns};
     return pos;
 }
 
-bool IsVisPosOverGlyph(const State &s, VisPos pos) { return pos.Row < s.Layout.TotalRows && pos.Column <= s.Layout.Rows[pos.Row].Columns; }
-
-void ScreenToDoc(const State &s, ImVec2 screenPos, DocPos &glyphPos, DocPos &cursorPos) {
-    const auto &t = s.Layout;
-    const auto colNo = uint64_t(screenPos.x), rowNo = uint64_t(screenPos.y);
-    if (screenPos.y <= 0.0f) {
-        glyphPos = cursorPos = {};
-    } else if (rowNo >= t.TotalRows) {
-        glyphPos = cursorPos = Bottom(s.Doc);
-    } else {
-        const auto &row = t.Rows[rowNo];
-        const auto &line = t.Lines[row.Line];
-        const auto lineStart = LineStart(s.Doc, row.Line);
-        if (screenPos.x <= 0.0f) {
-            glyphPos = cursorPos = {row.Line, 0};
-        } else if (colNo > row.Columns) {
-            if (line.FirstSection != InvalidLine) glyphPos = {row.Line, t.Sections[line.FirstSection + row.Section].EndIndex};
-            else glyphPos = EndOfLine(s.Doc, {row.Line, 0});
-            cursorPos = glyphPos;
-        } else {
-            uint64_t index, left, right, end, lineColumn = 0;
-            if (line.FirstSection != InvalidLine) {
-                const auto &section = t.Sections[line.FirstSection + row.Section];
-                index = section.StartIndex;
-                left = right = section.Indent;
-                end = section.EndIndex;
-                ColumnsBefore(s, lineStart, 0, section.StartIndex, lineColumn);
-            } else {
-                index = left = right = 0;
-                end = LineLength(s.Doc, row.Line);
-            }
-            while (float(right) < screenPos.x && index < end) {
-                left = right;
-                const auto w = Columns(s.Config, s.Doc[lineStart + index], lineColumn);
-                lineColumn += w;
-                right += w;
-                ++index;
-            }
-            const auto leftDiff = screenPos.x - float(left), rightDiff = float(right) - screenPos.x;
-            glyphPos = {row.Line, left == right ? index : index - 1};
-            cursorPos = {row.Line, leftDiff <= rightDiff ? index - 1 : index};
-        }
-    }
+std::pair<DocPos, DocPos> ScreenToDoc(const State &s, ImVec2 screenPos) {
+    if (screenPos.y <= 0.0f) return {};
+    const auto rowNo = uint64_t(screenPos.y);
+    if (rowNo >= s.Layout.Rows.size()) return {Bottom(s.Doc), Bottom(s.Doc)};
+    const auto &row = s.Layout.Rows[rowNo];
+    if (screenPos.x <= 0.0f) return {{row.Line, 0}, {row.Line, 0}};
+    RowWalk walk(s, row.Line, row.Section);
+    if (uint64_t(screenPos.x) > row.Columns) return {{row.Line, walk.End}, {row.Line, walk.End}};
+    const auto left = walk.StepTo(screenPos.x), right = walk.Column;
+    const auto leftDiff = screenPos.x - float(left), rightDiff = float(right) - screenPos.x;
+    const DocPos glyphPos{row.Line, left == right ? walk.Index : walk.Index - 1};
+    const DocPos cursorPos{row.Line, leftDiff <= rightDiff ? walk.Index - 1 : walk.Index};
+    return {glyphPos, cursorPos};
 }
 
 void RefreshMiniMap(State &s) {
-    const bool configChanged = s.MiniRowsFor != s.Config.ShowMiniMap;
-    s.MiniRowsFor = s.Config.ShowMiniMap;
-    if (!configChanged && s.MiniRowsLayout == s.Layout.Version && s.MiniRowsColors == s.Derived.Version) return;
+    if (s.MiniRowsLayout == s.Layout.Version && s.MiniRowsColors == s.Derived.Version) return;
     s.MiniRowsLayout = s.Layout.Version;
     s.MiniRowsColors = s.Derived.Version;
     s.MiniRows.clear();
-    const auto &t = s.Layout;
-    for (uint64_t i = 0; i < t.TotalRows; ++i) {
-        const auto &row = t.Rows[i];
-        const auto &line = t.Lines[row.Line];
-        const auto lineStart = LineStart(s.Doc, row.Line);
-        uint64_t index = 0, column = 0, endColumn = line.Columns, lineColumn = 0;
-        if (s.Config.WordWrap && line.FirstSection != InvalidLine) {
-            const auto &section = t.Sections[line.FirstSection + row.Section];
-            index = section.StartIndex;
-            column = section.Indent;
-            endColumn = section.Columns;
-            for (uint64_t k = 0; k < index; ++k) lineColumn += Columns(s.Config, s.Doc[lineStart + k], lineColumn);
-        }
+    for (const auto &row : s.Layout.Rows) {
+        RowWalk walk(s, row.Line, row.Section);
         auto &mini = s.MiniRows.emplace_back();
-        auto start = column;
+        auto start = walk.Column;
         auto color = Color::Background;
-        while (column < endColumn) {
-            const auto offset = lineStart + index++;
-            const auto glyphColor = Color(s.Derived.Colors[offset]);
+        while (walk.Column < row.Columns) {
+            const auto glyphColor = ColorAt(s, walk.Start + walk.Index);
             if (glyphColor != color) {
-                if (column != start) {
-                    if (color != Color::Whitespace) mini.Sections.push_back({start, column, color});
-                    start = column;
+                if (walk.Column != start) {
+                    if (color != Color::Whitespace) mini.Sections.push_back({start, walk.Column, color});
+                    start = walk.Column;
                 }
                 color = glyphColor;
             }
-            const auto w = Columns(s.Config, s.Doc[offset], lineColumn);
-            lineColumn += w;
-            column += w;
+            walk.Step();
         }
-        if (column != start && color != Color::Whitespace) mini.Sections.push_back({start, column, color});
+        if (walk.Column != start && color != Color::Whitespace) mini.Sections.push_back({start, walk.Column, color});
     }
 }
 

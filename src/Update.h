@@ -38,7 +38,6 @@ enum struct Op : uint8_t {
     OpenFindReplace,
     CloseFindReplace,
     Find,
-    FindNext,
     FindAll,
     Replace,
     ReplaceAll,
@@ -46,8 +45,7 @@ enum struct Op : uint8_t {
     FocusEditor,
     ToggleCaseSensitiveFind,
     ToggleWholeWordFind,
-    PanBy, // `Vec`: drag delta.
-    ScrollModeBy, // `Vec`: scroll offset.
+    PanBy, // `Vec`: subtracted from the scroll.
     StopScrollMode,
     DragLineSelect, // `Pos`: caret position under the mouse.
     DragSelect,
@@ -78,8 +76,8 @@ struct Action {
 };
 
 State Update(State s, const Action &a);
-void MakeCursorVisible(State &s);
 void RefreshSuggestions(State &s);
 void UpdateAutoCompleteContext(State &s);
 void UnfoldAroundLine(State &s, uint64_t line);
+void ScrollToLine(State &s, uint64_t line, State::Align alignment, float fraction = 0.0f);
 } // namespace ipte

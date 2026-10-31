@@ -1,4 +1,3 @@
-
 #include "Language.h"
 #include "TextEdit.h"
 #include "Vector.h"
@@ -11,7 +10,7 @@
 
 #include <cstdio>
 #include <fstream>
-#include <sstream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -36,26 +35,29 @@ struct App {
 };
 
 const ipte::Language *Languages[]{nullptr, ipte::Cpp(), ipte::C(), ipte::Cs(), ipte::AngelScript(), ipte::Lua(), ipte::Python(), ipte::Glsl(), ipte::Hlsl(), ipte::Json(), ipte::Markdown(), ipte::Sql()};
-const char *LanguageNames[]{"None", "C++", "C", "C#", "AngelScript", "Lua", "Python", "GLSL", "HLSL", "JSON", "Markdown", "SQL"};
+
+// Begins the window `name` while `*open`, placed at `pos` with `width` on first use. Call `ImGui::End` when it returns true.
+bool BeginToolWindow(const char *name, bool *open, ImVec2 pos, float width) {
+    if (!*open) return false;
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({width, 0}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(name, open)) return true;
+    ImGui::End();
+    return false;
+}
 
 void SettingsWindow(App &app) {
-    if (!app.ShowSettings) return;
-    ImGui::SetNextWindowPos({910, 10}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({320, 0}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Settings", &app.ShowSettings)) {
-        ImGui::End();
-        return;
-    }
+    if (!BeginToolWindow("Settings", &app.ShowSettings, {910, 10}, 320)) return;
     auto &c = app.Editor.Config;
-    if (ImGui::Combo("Language", &app.LanguageIndex, LanguageNames, IM_ARRAYSIZE(LanguageNames))) c.Language = Languages[app.LanguageIndex];
+    if (ImGui::Combo("Language", &app.LanguageIndex, [](void *, int i) { return i ? Languages[i]->Name.c_str() : "None"; }, nullptr, IM_ARRAYSIZE(Languages))) c.Language = Languages[app.LanguageIndex];
     int tabSize{int(c.TabSize)};
     if (ImGui::SliderInt("Tab size", &tabSize, 1, 8)) c.TabSize = uint32_t(tabSize);
     ImGui::SliderFloat("Line spacing", &c.LineSpacing, 1.0f, 2.0f);
     ImGui::SliderFloat("Font size", &app.FontSize, 8.0f, 32.0f);
     bool dark{c.Colors == ipte::DarkPalette()};
     if (ImGui::Checkbox("Dark palette", &dark)) {
-        c.Colors{dark ? ipte::DarkPalette() : ipte::LightPalette()};
-        app.Editor.ShadedAlpha{-1};
+        c.Colors = dark ? ipte::DarkPalette() : ipte::LightPalette();
+        app.Editor.ShadedAlpha = -1;
         if (dark) ImGui::StyleColorsDark();
         else ImGui::StyleColorsLight();
     }
@@ -86,13 +88,7 @@ void SettingsWindow(App &app) {
 std::vector<std::string> Suggest(const ipte::AutoCompleteContext &context) { return context.SearchTerm.empty() ? std::vector<std::string>{} : std::vector<std::string>{context.SearchTerm + "_suggestion"}; }
 
 void PersistentWindow(App &app) {
-    if (!app.ShowPersistent) return;
-    ImGui::SetNextWindowPos({910, 600}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({360, 0}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Persistent", &app.ShowPersistent)) {
-        ImGui::End();
-        return;
-    }
+    if (!BeginToolWindow("Persistent", &app.ShowPersistent, {910, 600}, 360)) return;
     const auto &s = app.Editor;
     ImGui::Text("Codepoints: %llu", (unsigned long long)s.Doc.Size);
     ImGui::Text("Lines: %llu", (unsigned long long)(vec::Weight(s.Doc) + 1));
@@ -125,25 +121,17 @@ int main(int argc, char **argv) {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui_ImplSDL3_InitForSDLGPU(window);
-    ImGui_ImplSDLGPU3_InitInfo init{};
-    init.Device{device};
-    init.ColorTargetFormat{SDL_GetGPUSwapchainTextureFormat(device, window)};
-    init.MSAASamples{SDL_GPU_SAMPLECOUNT_1};
+    ImGui_ImplSDLGPU3_InitInfo init{.Device = device, .ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(device, window)};
     ImGui_ImplSDLGPU3_Init(&init);
 
     App app;
     std::string text{SampleText};
     if (argc > 1) {
         std::ifstream file(argv[1]);
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        text{buffer.str()};
+        text.assign(std::istreambuf_iterator<char>(file), {});
     }
-    ipte::Settings config;
-    config.Language{Languages[app.LanguageIndex]};
-    config.AutoComplete.Provider{Suggest};
-    app.Editor{ipte::Initial(text, config)};
-    app.Editor.FocusOnEditor{true};
+    app.Editor = ipte::Initial(text, {.Language = Languages[app.LanguageIndex], .AutoComplete = {.Provider = Suggest}});
+    app.Editor.FocusOnEditor = true;
 
     bool done{false};
     while (!done) {
@@ -173,7 +161,7 @@ int main(int argc, char **argv) {
                 }
                 ImGui::EndMenuBar();
             }
-            app.Editor{ipte::Frame(std::move(app.Editor), "TextEdit")};
+            app.Editor = ipte::Frame(std::move(app.Editor), "TextEdit");
         }
         ImGui::End();
         ImGui::PopFont();
@@ -187,11 +175,7 @@ int main(int argc, char **argv) {
         SDL_WaitAndAcquireGPUSwapchainTexture(commandBuffer, window, &swapchain, nullptr, nullptr);
         if (swapchain && drawData->DisplaySize.x > 0 && drawData->DisplaySize.y > 0) {
             ImGui_ImplSDLGPU3_PrepareDrawData(drawData, commandBuffer);
-            SDL_GPUColorTargetInfo target{};
-            target.texture{swapchain};
-            target.clear_color{SDL_FColor{0.1f, 0.1f, 0.1f, 1.0f}};
-            target.load_op{SDL_GPU_LOADOP_CLEAR};
-            target.store_op{SDL_GPU_STOREOP_STORE};
+            SDL_GPUColorTargetInfo target{.texture = swapchain, .clear_color = {0.1f, 0.1f, 0.1f, 1.0f}, .load_op = SDL_GPU_LOADOP_CLEAR, .store_op = SDL_GPU_STOREOP_STORE};
             auto *pass = SDL_BeginGPURenderPass(commandBuffer, &target, 1, nullptr);
             ImGui_ImplSDLGPU3_RenderDrawData(drawData, commandBuffer, pass);
             SDL_EndGPURenderPass(pass);

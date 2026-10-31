@@ -2,9 +2,10 @@
 
 #include "Layout.h"
 
+#include <algorithm>
+
 namespace ipte {
 bool IsPairOpener(uint64_t cp) { return cp == '{' || cp == '[' || cp == '(' || cp == '\'' || cp == '"'; }
-bool IsPairCloser(uint64_t cp) { return cp == '}' || cp == ']' || cp == ')' || cp == '\'' || cp == '"'; }
 bool IsBracketOpener(uint64_t cp) { return cp == '{' || cp == '[' || cp == '('; }
 bool IsBracketCloser(uint64_t cp) { return cp == '}' || cp == ']' || cp == ')'; }
 uint64_t ToPairCloser(uint64_t cp) {
@@ -69,12 +70,6 @@ std::string Utf8(uint64_t cp) {
     return out;
 }
 
-std::string Utf8(const std::vector<uint64_t> &codepoints) {
-    std::string out;
-    for (const auto cp : codepoints) out += Utf8(cp);
-    return out;
-}
-
 uint64_t LineCount(const Text &doc) { return vec::Weight(doc) + 1; }
 uint64_t LineStart(const Text &doc, uint64_t line) { return line ? vec::Seek(doc, line - 1) + 1 : 0; }
 uint64_t LineEnd(const Text &doc, uint64_t line) { return line + 1 < LineCount(doc) ? vec::Seek(doc, line) : doc.Size; }
@@ -88,12 +83,9 @@ uint64_t CodepointAt(const Text &doc, DocPos pos) {
     const auto offset = Offset(doc, pos);
     return offset < LineEnd(doc, pos.Line) ? doc[offset] : InvalidCodepoint;
 }
-
-uint64_t SpacesToTab(const Settings &config, const Text &doc, DocPos pos) {
-    uint64_t columns = 0;
-    const auto start = LineStart(doc, pos.Line);
-    for (uint64_t i = 0; i < pos.Index; ++i) columns += GlyphWidth(doc[start + i]);
-    return ((columns / config.TabSize) + 1) * config.TabSize - columns;
+void LineCodepoints(const Text &doc, uint64_t line, std::vector<uint64_t> &out) {
+    out.clear();
+    for (auto i = LineStart(doc, line), end = LineEnd(doc, line); i < end; ++i) out.push_back(doc[i]);
 }
 
 Inserted InsertText(const Settings &config, const Text &doc, DocPos start, std::string_view text) {
@@ -112,8 +104,8 @@ Inserted InsertText(const Settings &config, const Text &doc, DocPos start, std::
             index = 0;
             columns = 0;
         } else if (config.InsertSpacesOnTabs && cp == '\t') {
-            const auto spaces = ((columns / config.TabSize) + 1) * config.TabSize - columns;
-            for (uint64_t k = 0; k < spaces; ++k) glyphs.push_back(' ');
+            const auto spaces = Columns(config.TabSize, cp, columns);
+            glyphs.insert(glyphs.end(), spaces, ' ');
             index += spaces;
             columns += spaces;
         } else if (cp != '\r') {
@@ -135,14 +127,40 @@ std::string SectionText(const Text &doc, DocPos start, DocPos end) {
 
 std::string LineText(const Text &doc, uint64_t line) { return SectionText(doc, {line, 0}, {line, LineLength(doc, line)}); }
 
+namespace {
+// Returns whether `cp` continues the run that `first` starts.
+// A run is whitespace, word glyphs or other glyphs, and only word glyphs with `wordOnly`.
+bool SameRun(uint64_t first, uint64_t cp, bool wordOnly) {
+    if (!wordOnly && IsWhiteSpace(first)) return IsWhiteSpace(cp);
+    if (IsWord(first)) return IsWord(cp);
+    return !wordOnly && !IsWord(cp) && !IsWhiteSpace(cp);
+}
+
+// Returns the position of the last non-whitespace glyph before `from` on its line, or the line start.
+DocPos FindPreviousNonWhiteSpace(const Text &doc, DocPos from) {
+    const auto lineStart = LineStart(doc, from.Line);
+    auto index = from.Index;
+    while (index > 0 && IsWhiteSpace(doc[lineStart + index - 1])) --index;
+    return {from.Line, index > 0 ? index - 1 : 0};
+}
+
+// Returns the position of the first non-whitespace glyph at or after `from` on its line, or the line end.
+DocPos FindNextNonWhiteSpace(const Text &doc, DocPos from) {
+    const auto lineStart = LineStart(doc, from.Line), size = LineLength(doc, from.Line);
+    auto index = from.Index;
+    while (index < size && IsWhiteSpace(doc[lineStart + index])) ++index;
+    return {from.Line, std::min(index, size)};
+}
+} // namespace
+
 DocPos Left(const State &s, DocPos from, bool wordMode) {
-    if (wordMode) return FindWordStart(s.Doc, FindPreviousNonWhiteSpace(s, Left(s, from), false));
+    if (wordMode) return FindWordStart(s.Doc, FindPreviousNonWhiteSpace(s.Doc, Left(s, from)));
     if (from.Index == 0) return LeftBeforeHiddenLines(s, from);
     return {from.Line, from.Index - 1};
 }
 
 DocPos Right(const State &s, DocPos from, bool wordMode) {
-    if (wordMode) return FindWordEnd(s.Doc, FindNextNonWhiteSpace(s, Right(s, from), false));
+    if (wordMode) return FindWordEnd(s.Doc, FindNextNonWhiteSpace(s.Doc, Right(s, from)));
     if (from.Index == LineLength(s.Doc, from.Line)) return RightAfterHiddenLines(s, from);
     return {from.Line, from.Index + 1};
 }
@@ -156,157 +174,65 @@ DocPos EndOfLine(const Text &doc, DocPos from) { return {from.Line, LineLength(d
 DocPos NextLine(const State &s, DocPos from) { return Right(s, EndOfLine(s.Doc, from)); }
 
 DocPos FindWordStart(const Text &doc, DocPos from, bool wordOnly) {
-    const auto lineStart = LineStart(doc, from.Line), lineSize = LineLength(doc, from.Line);
-    if (from.Index == 0 || lineSize == 0) return from;
+    if (from.Index == 0 || LineLength(doc, from.Line) == 0) return from;
+    const auto lineStart = LineStart(doc, from.Line), first = doc[lineStart + from.Index - 1];
     auto index = from.Index;
-    const auto at = [&](uint64_t i) { return doc[lineStart + i]; };
-    const auto first = at(index - 1);
-    if (!wordOnly && IsWhiteSpace(first)) {
-        while (index > 0 && IsWhiteSpace(at(index - 1))) --index;
-    } else if (IsWord(first)) {
-        while (index > 0 && IsWord(at(index - 1))) --index;
-    } else {
-        while (!wordOnly && index > 0 && !IsWord(at(index - 1)) && !IsWhiteSpace(at(index - 1))) --index;
-    }
+    while (index > 0 && SameRun(first, doc[lineStart + index - 1], wordOnly)) --index;
     return {from.Line, index};
 }
 
 DocPos FindWordEnd(const Text &doc, DocPos from, bool wordOnly) {
     const auto lineStart = LineStart(doc, from.Line), size = LineLength(doc, from.Line);
+    if (from.Index >= size) return from;
+    const auto first = doc[lineStart + from.Index];
     auto index = from.Index;
-    if (index >= size) return from;
-    const auto at = [&](uint64_t i) { return doc[lineStart + i]; };
-    const auto first = at(index);
-    if (!wordOnly && IsWhiteSpace(first)) {
-        while (index < size && IsWhiteSpace(at(index))) ++index;
-    } else if (IsWord(first)) {
-        while (index < size && IsWord(at(index))) ++index;
-    } else {
-        while (!wordOnly && index < size && !IsWord(at(index)) && !IsWhiteSpace(at(index))) ++index;
-    }
+    while (index < size && SameRun(first, doc[lineStart + index], wordOnly)) ++index;
     return {from.Line, index};
 }
 
-DocPos FindPreviousNonWhiteSpace(const State &s, DocPos from, bool includeEndOfLine) {
-    const auto &doc = s.Doc;
-    while (true) {
-        const auto lineStart = LineStart(doc, from.Line);
-        auto index = from.Index;
-        while (index > 0) {
-            --index;
-            if (!IsWhiteSpace(doc[lineStart + index])) return {from.Line, index};
-        }
-        if (from.Line == 0 || !includeEndOfLine) return {from.Line, 0};
-        from = LeftBeforeHiddenLines(s, from);
-    }
-}
-
-DocPos FindNextNonWhiteSpace(const State &s, DocPos from, bool includeEndOfLine) {
-    const auto &doc = s.Doc;
-    while (true) {
-        const auto lineStart = LineStart(doc, from.Line), size = LineLength(doc, from.Line);
-        auto index = from.Index;
-        while (index < size) {
-            if (!IsWhiteSpace(doc[lineStart + index])) return {from.Line, index};
-            ++index;
-        }
-        // Upstream compares against the line count, which never matches. See UpstreamBugs.md.
-        if (from.Line == LineCount(doc) || !includeEndOfLine) return {from.Line, size};
-        const auto next = RightAfterHiddenLines(s, from);
-        if (next == from) return next;
-        from = next;
-    }
-}
-
+namespace {
 bool IsWordStart(const Text &doc, DocPos pos, bool wordOnly) {
-    const auto size = LineLength(doc, pos.Line);
-    if (pos.Index == size) return false;
-    const auto lineStart = LineStart(doc, pos.Line);
-    if (pos.Index == 0) return size != 0 && (!wordOnly || IsWord(doc[lineStart]));
-    const auto g1 = doc[lineStart + pos.Index - 1], g2 = doc[lineStart + pos.Index];
-    if (wordOnly) return !IsWord(g1) && IsWord(g2);
-    if (IsWord(g2)) return !IsWord(g1);
-    if (IsWhiteSpace(g2)) return !IsWhiteSpace(g1);
-    return IsWord(g1) || IsWhiteSpace(g1);
+    if (pos.Index == LineLength(doc, pos.Line)) return false;
+    const auto lineStart = LineStart(doc, pos.Line), next = doc[lineStart + pos.Index];
+    if (wordOnly && !IsWord(next)) return false;
+    return pos.Index == 0 || !SameRun(next, doc[lineStart + pos.Index - 1], wordOnly);
 }
 
 bool IsWordEnd(const Text &doc, DocPos pos, bool wordOnly) {
-    const auto size = LineLength(doc, pos.Line);
     if (pos.Index == 0) return false;
-    const auto lineStart = LineStart(doc, pos.Line);
-    if (pos.Index == size) return size != 0 && (!wordOnly || IsWord(doc[lineStart + size - 1]));
-    const auto g1 = doc[lineStart + pos.Index - 1], g2 = doc[lineStart + pos.Index];
-    if (wordOnly) return IsWord(g1) && !IsWord(g2);
-    if (IsWord(g1)) return !IsWord(g2);
-    if (IsWhiteSpace(g1)) return !IsWhiteSpace(g2);
-    return IsWord(g2) || IsWhiteSpace(g2);
+    const auto lineStart = LineStart(doc, pos.Line), previous = doc[lineStart + pos.Index - 1];
+    if (wordOnly && !IsWord(previous)) return false;
+    return pos.Index == LineLength(doc, pos.Line) || !SameRun(previous, doc[lineStart + pos.Index], wordOnly);
 }
 
-bool IsWholeWord(const Text &doc, DocPos start, DocPos end, bool wordOnly) {
-    if (end <= start || start.Line != end.Line) return false;
-    return IsWordStart(doc, start, wordOnly) && IsWordEnd(doc, end, wordOnly);
+bool IsWholeWord(const Text &doc, DocPos start, DocPos end) {
+    return start < end && start.Line == end.Line && IsWordStart(doc, start, false) && IsWordEnd(doc, end, false);
 }
+} // namespace
 
 Selection WholeWord(const Text &doc, DocPos pos, bool wordOnly) {
-    const auto size = LineLength(doc, pos.Line);
-    if (wordOnly && pos.Index != 0 && pos.Index != size && !IsWord(CodepointAt(doc, pos))) return {pos, pos};
+    if (wordOnly && pos.Index != 0 && pos.Index != LineLength(doc, pos.Line) && !IsWord(CodepointAt(doc, pos))) return {pos, pos};
     if (IsWordStart(doc, pos, wordOnly)) return {pos, FindWordEnd(doc, pos, wordOnly)};
     if (IsWordEnd(doc, pos, wordOnly)) return {FindWordStart(doc, pos, wordOnly), pos};
     return {FindWordStart(doc, pos, wordOnly), FindWordEnd(doc, pos, wordOnly)};
 }
 
-bool FindText(const Text &doc, DocPos from, std::string_view text, bool caseSensitive, bool wholeWord, DocPos &start, DocPos &end) {
-    std::vector<uint64_t> search;
-    for (const auto cp : Codepoints(text)) search.push_back(caseSensitive ? cp : ToLower(cp));
-    const auto lines = LineCount(doc);
-    const auto startLine = from.Line, startIndex = from.Index;
-    auto searchLine = startLine, searchIndex = startIndex;
+std::optional<Selection> FindText(const Text &doc, DocPos from, std::string_view text, bool caseSensitive, bool wholeWord) {
+    const auto lower = [&](uint64_t cp) { return caseSensitive ? cp : ToLower(cp); };
+    auto search = Codepoints(text);
+    for (auto &cp : search) cp = lower(cp);
+    const auto first = Offset(doc, from);
+    auto start = first;
     do {
-        auto line = searchLine, index = searchIndex;
-        auto lineStart = LineStart(doc, line), lineSize = LineLength(doc, line);
-        bool done = false;
         size_t j = 0;
-        while (!done && j < search.size()) {
-            if (search[j] == Newline) {
-                if (index == lineSize) {
-                    if (line == lines - 1) {
-                        done = true;
-                    } else {
-                        ++line;
-                        index = 0;
-                        lineStart = LineStart(doc, line);
-                        lineSize = LineLength(doc, line);
-                        ++j;
-                    }
-                } else {
-                    done = true;
-                }
-            } else if (index == lineSize) {
-                done = true;
-            } else {
-                auto ch = doc[lineStart + index];
-                if (!caseSensitive) ch = ToLower(ch);
-                if (ch == search[j]) {
-                    ++index;
-                    ++j;
-                } else {
-                    done = true;
-                }
-            }
-        }
+        while (j < search.size() && start + j < doc.Size && lower(doc[start + j]) == search[j]) ++j;
         if (j == search.size()) {
-            start = {searchLine, searchIndex};
-            end = {line, index};
-            if (!wholeWord || IsWholeWord(doc, start, end)) return true;
+            const Selection match{Pos(doc, start), Pos(doc, start + j)};
+            if (!wholeWord || IsWholeWord(doc, match.Start, match.End)) return match;
         }
-        if (searchIndex == LineLength(doc, searchLine)) {
-            searchLine = searchLine == lines - 1 ? 0 : searchLine + 1;
-            searchIndex = 0;
-        } else {
-            ++searchIndex;
-        }
-    } while (searchLine != startLine || searchIndex != startIndex);
-    return false;
+        start = start == doc.Size ? 0 : start + 1;
+    } while (start != first);
+    return {};
 }
 
 DocPos Normalize(const Text &doc, DocPos pos) {

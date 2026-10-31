@@ -18,6 +18,6 @@ target_link_libraries(Upstream PUBLIC imgui)
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS *.cpp)
 add_executable(DrawListTest ${TEST_SOURCES})
-target_compile_options(DrawListTest PRIVATE -Wall -Wextra -Wno-missing-field-initializers -Wno-missing-designated-field-initializers)
-target_compile_definitions(DrawListTest PRIVATE IPTE_SOURCE_DIR="${CMAKE_SOURCE_DIR}" IPTE_BINARY_DIR="${CMAKE_BINARY_DIR}")
+target_compile_options(DrawListTest PRIVATE ${IPTE_WARNINGS})
+target_compile_definitions(DrawListTest PRIVATE IPTE_BINARY_DIR="${CMAKE_BINARY_DIR}")
 target_link_libraries(DrawListTest PRIVATE TextEdit Upstream Boost::ut)
